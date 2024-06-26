@@ -24,8 +24,9 @@ repository = "https://github.com/arkedge/gaia"
 license = "MPL-2.0"
 
 [workspace.dependencies]
-structpack = "1.0"
-gaia-stub = "1.0"
-gaia-ccsds-c2a = "1.0"
-gaia-tmtc = "1.0"
-c2a-devtools-frontend = "1.0"
+gaia-stub = { path = "./gaia-stub" }
+gaia-ccsds-c2a = { path = "./gaia-ccsds-c2a" }
+gaia-tmtc = { path = "./gaia-tmtc" }
+structpack = { path = "./structpack" }
+tmtc-c2a = { path = "./tmtc-c2a" }
+c2a-devtools-frontend = { path = "./devtools-frontend" }
