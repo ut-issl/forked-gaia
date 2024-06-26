@@ -12,7 +12,7 @@ members = [
 
 exclude = [
     # WASM 用の別の cargo workspace であるため
-    "devtools-frontend/crates",
+    "./devtools-frontend/crates",
     # ビルド時はdevtools_frontend/crates が OUT_DIR 以下にコピーされた後wasm-pack buildされるため
     "target",
 ]
