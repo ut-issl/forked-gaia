@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::{fs, io};
 
 use anyhow::{Context, Result};
+use axum::ServiceExt;
 use axum::{error_handling::HandleError, response::Redirect, routing::get};
 use clap::Parser;
 use gaia_tmtc::broker::broker_server::BrokerServer;
@@ -27,7 +28,7 @@ use tower_http::trace::TraceLayer;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use tmtc_c2a::{devtools_server, kble_gs, proto, registry, satellite, Satconfig};
+use tmtc_c2a::{kble_gs, proto, registry, satellite, Satconfig};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -180,15 +181,7 @@ async fn main() -> Result<()> {
             .add_service(reflection_service)
             .into_service();
 
-        let app = axum::Router::new()
-            .nest(
-                "/devtools/",
-                axum::Router::new().fallback(devtools_server::serve),
-            )
-            .route("/", get(|| async { Redirect::to("/devtools/") }))
-            .route("/devtools", get(|| async { Redirect::to("/devtools/") }))
-            .fallback_service(HandleError::new(rpc_service, handle_rpc_error));
-        axum::Server::bind(&socket_addr).serve(app.into_make_service())
+        axum::Server::bind(&socket_addr).serve(rpc_service.into_make_service())
     };
 
     tokio::select! {

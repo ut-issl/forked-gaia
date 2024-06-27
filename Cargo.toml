@@ -7,13 +7,10 @@ members = [
     "gaia-tmtc",
     "gaia-ccsds-c2a",
     "tmtc-c2a",
-    "devtools-frontend",
 ]
 
 exclude = [
     # WASM 用の別の cargo workspace であるため
-    "./devtools-frontend/crates",
-    "./devtools-frontend/crates/opslang-wasm", 
     # ビルド時はdevtools_frontend/crates が OUT_DIR 以下にコピーされた後wasm-pack buildされるため
     "target",
 ]
@@ -30,4 +27,3 @@ gaia-ccsds-c2a = { path = "./gaia-ccsds-c2a" }
 gaia-tmtc = { path = "./gaia-tmtc" }
 structpack = { path = "./structpack" }
 tmtc-c2a = { path = "./tmtc-c2a" }
-c2a-devtools-frontend = { path = "./devtools-frontend" }

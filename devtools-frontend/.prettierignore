@@ -1,7 +1,0 @@
-pnpm-lock.yaml
-/dist/
-/node_modules/
-/deploy/
-/src/proto/
-/crates/*/target
-/crates/*/pkg
