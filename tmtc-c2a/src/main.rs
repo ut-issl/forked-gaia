@@ -101,7 +101,15 @@ async fn main() -> Result<()> {
     )?;
 
     let recorder_client = if let Some(recorder_endpoint) = args.recorder_endpoint {
-        let recorder_client_channel = Channel::builder(recorder_endpoint).connect().await?;
+        let recorder_client_channel = loop {
+            match Channel::builder(recorder_endpoint.clone()).connect().await {
+                Ok(channel) => break channel,
+                Err(e) => {
+                    tracing::warn!(message = "recorder not available", %e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        };
         let recorder_client = RecorderClient::new(recorder_client_channel);
         Some(recorder_client)
     } else {
