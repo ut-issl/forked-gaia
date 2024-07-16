@@ -38,6 +38,7 @@ impl Polynomial {
 
 #[derive(Debug, Clone)]
 pub enum Integral {
+    Hex,
     Status(Status),
     Polynomial(Polynomial),
 }

@@ -37,7 +37,7 @@ impl IntegralFieldSchema {
             Some(converter::Integral::Polynomial(poly)) => {
                 FieldValue::Double(poly.convert(try_integral_to_f64(value)?))
             }
-            None => FieldValue::Integer(value.try_into()?),
+            _ => FieldValue::Integer(value.try_into()?),
         };
         Ok((raw, converted))
     }
@@ -203,7 +203,7 @@ fn build_telemetry_floating_field<T: Floating>(
 fn build_integral_converter(conv_info: &tlmdb::ConversionInfo) -> Option<converter::Integral> {
     match conv_info {
         tlmdb::ConversionInfo::None => None,
-        tlmdb::ConversionInfo::Hex => None,
+        tlmdb::ConversionInfo::Hex => Some(converter::Integral::Hex),
         tlmdb::ConversionInfo::Status(status) => {
             Some(converter::Integral::Status(status.clone().into()))
         }
@@ -219,6 +219,9 @@ fn as_polynomial(converter: Option<converter::Integral>) -> Result<Option<conver
         Some(converter::Integral::Status(s)) => Err(anyhow!(
             "invalid converter for floating-point number: {:?}",
             s
+        )),
+        Some(converter::Integral::Hex) => Err(anyhow!(
+            "invalid converter for floating-point number: Hex",
         )),
         None => Ok(None),
     }

@@ -57,14 +57,21 @@ pub struct FieldMetadata {
     pub raw_name: String,
     pub description: String,
     pub data_type: DataType,
+    pub is_hex: bool
 }
 
 #[derive(Debug, Clone)]
 pub enum DataType {
-    Integer,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Uint8,
+    Uint16,
+    Uint32,
+    Uint64,
+    Float,
     Double,
-    Enum,
-    Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -108,11 +115,18 @@ impl Registry {
                         metadata: Some(proto::TelemetryFieldSchemaMetadata {
                             description: m.description.clone(),
                             data_type: match m.data_type {
-                                DataType::Integer => proto::TelemetryFieldDataType::Integer as i32,
-                                DataType::Double => proto::TelemetryFieldDataType::Double as i32,
-                                DataType::Enum => proto::TelemetryFieldDataType::Enum as i32,
-                                DataType::Bytes => proto::TelemetryFieldDataType::Bytes as i32,
+                                DataType::Int8 => proto::TelemetryFieldDataType::TlmFieldInt8 as i32,
+                                DataType::Int16 => proto::TelemetryFieldDataType::TlmFieldInt16 as i32,
+                                DataType::Int32 => proto::TelemetryFieldDataType::TlmFieldInt32 as i32,
+                                DataType::Int64 => proto::TelemetryFieldDataType::TlmFieldInt64 as i32,
+                                DataType::Uint8 => proto::TelemetryFieldDataType::TlmFieldUint8 as i32,
+                                DataType::Uint16 => proto::TelemetryFieldDataType::TlmFieldUint16 as i32,
+                                DataType::Uint32 => proto::TelemetryFieldDataType::TlmFieldUint32 as i32,
+                                DataType::Uint64 => proto::TelemetryFieldDataType::TlmFieldUint64 as i32,
+                                DataType::Float => proto::TelemetryFieldDataType::TlmFieldFloat as i32,
+                                DataType::Double => proto::TelemetryFieldDataType::TlmFieldDouble as i32,
                             },
+                            is_hex: m.is_hex
                         }),
                         name: m.original_name.to_string(),
                     })
@@ -221,21 +235,37 @@ fn build_telemetry_schema<'a>(
     };
     for (order, pair) in iter.enumerate() {
         let (field_name, field_schema) = pair?;
-        let data_type = match &field_schema.value {
-            FieldValueSchema::Integral(schema) => match schema.converter {
-                Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Polynomial(_)) => {
-                    DataType::Double
+        let (data_type, is_hex) = match &field_schema.value {
+            FieldValueSchema::Integral(schema) => (
+                match schema.field {
+                    structpack::GenericIntegralField::I8(_) => DataType::Int8,
+                    structpack::GenericIntegralField::I16(_) => DataType::Int16,
+                    structpack::GenericIntegralField::I32(_) => DataType::Int32,
+                    structpack::GenericIntegralField::I64(_) => DataType::Int64,
+                    structpack::GenericIntegralField::U8(_) => DataType::Uint8,
+                    structpack::GenericIntegralField::U16(_) => DataType::Uint16,
+                    structpack::GenericIntegralField::U32(_) => DataType::Uint32,
+                    structpack::GenericIntegralField::U64(_) => DataType::Uint64,
+                },
+                match schema.converter {
+                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Hex) => true,
+                    _ => false,
                 }
-                Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Status(_)) => DataType::Enum,
-                None => DataType::Integer,
-            },
-            FieldValueSchema::Floating(_) => DataType::Double,
+            ),
+            FieldValueSchema::Floating(schema) => (
+                match schema.field {
+                    structpack::GenericFloatingField::F32(_) => DataType::Float,
+                    structpack::GenericFloatingField::F64(_) => DataType::Double,
+                },
+                false,
+            )
         };
         let name_pair = build_field_metadata(
             order,
             field_name,
             &field_schema.metadata.description,
             data_type,
+            is_hex
         );
         match field_schema.value {
             FieldValueSchema::Integral(field_schema) => {
@@ -254,6 +284,7 @@ fn build_field_metadata(
     tlmdb_name: &str,
     description: &str,
     data_type: DataType,
+    is_hex: bool,
 ) -> FieldMetadata {
     FieldMetadata {
         order,
@@ -262,5 +293,6 @@ fn build_field_metadata(
         raw_name: format!("{tlmdb_name}@RAW"),
         description: description.to_string(),
         data_type,
+        is_hex
     }
 }

@@ -112,7 +112,7 @@ impl Registry {
                                 metadata: Some(proto::CommandParameterSchemaMetadata {
                                     description: metadata.description.clone(),
                                 }),
-                                data_type: proto::CommandParameterDataType::CmdParameterBytes
+                                data_type: proto::CommandParameterDataType::CmdParameterRaw
                                     .into(),
                             })
                         } else {
@@ -123,12 +123,25 @@ impl Registry {
                             .sized_parameters
                             .iter()
                             .map(|param| {
-                                let data_type = match param.value {
-                                    structpack::NumericField::Integral(_) => {
-                                        proto::CommandParameterDataType::CmdParameterInteger
+                                let data_type = match &param.value {
+                                    structpack::NumericField::Integral(i) => {
+                                        match i {
+                                            structpack::GenericIntegralField::U8(_) => proto::CommandParameterDataType::CmdParameterUint8,
+                                            structpack::GenericIntegralField::U16(_) => proto::CommandParameterDataType::CmdParameterUint16,
+                                            structpack::GenericIntegralField::U32(_) => proto::CommandParameterDataType::CmdParameterUint32,
+                                            structpack::GenericIntegralField::U64(_) => proto::CommandParameterDataType::CmdParameterUint64,
+                                            structpack::GenericIntegralField::I8(_) => proto::CommandParameterDataType::CmdParameterInt8,
+                                            structpack::GenericIntegralField::I16(_) => proto::CommandParameterDataType::CmdParameterInt16,
+                                            structpack::GenericIntegralField::I32(_) => proto::CommandParameterDataType::CmdParameterInt32,
+                                            structpack::GenericIntegralField::I64(_) => proto::CommandParameterDataType::CmdParameterInt64,
+                                        
+                                        }
                                     }
-                                    structpack::NumericField::Floating(_) => {
-                                        proto::CommandParameterDataType::CmdParameterDouble
+                                    structpack::NumericField::Floating(f) => {
+                                        match f {
+                                            structpack::GenericFloatingField::F32(_) => proto::CommandParameterDataType::CmdParameterFloat,
+                                            structpack::GenericFloatingField::F64(_) => proto::CommandParameterDataType::CmdParameterDouble,
+                                        }
                                     }
                                 };
                                 proto::CommandParameterSchema {

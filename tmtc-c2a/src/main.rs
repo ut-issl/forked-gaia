@@ -5,7 +5,6 @@ use std::{fs, io};
 
 use anyhow::{Context, Result};
 use axum::ServiceExt;
-use axum::{error_handling::HandleError, response::Redirect, routing::get};
 use clap::Parser;
 use gaia_tmtc::broker::broker_server::BrokerServer;
 use gaia_tmtc::recorder::recorder_client::RecorderClient;
@@ -197,17 +196,4 @@ async fn main() -> Result<()> {
         ret = kble_socket_fut => Ok(ret?),
         ret = server_task => Ok(ret?),
     }
-}
-
-async fn handle_rpc_error(
-    err: Box<dyn std::error::Error + Send + Sync>,
-) -> impl axum::response::IntoResponse {
-    (
-        axum::http::StatusCode::OK,
-        [
-            ("content-type", "application/grpc".to_owned()),
-            ("grpc-status", "13".to_owned()),
-            ("content-type", format!("internal error: {err}")),
-        ],
-    )
 }
