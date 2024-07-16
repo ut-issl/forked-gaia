@@ -81,6 +81,7 @@ message TelemetrySchema {
 
 message TelemetrySchemaMetadata {
   uint32 id = 1;
+  bool is_restricted = 2;
 }
 
 message TelemetryFieldSchema {

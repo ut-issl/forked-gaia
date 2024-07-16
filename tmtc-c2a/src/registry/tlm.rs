@@ -133,7 +133,10 @@ impl Registry {
                     })
                     .collect();
                 let telemetry_schema = proto::TelemetrySchema {
-                    metadata: Some(proto::TelemetrySchemaMetadata { id: *tlm_id as u32 }),
+                    metadata: Some(proto::TelemetrySchemaMetadata {
+                        id: *tlm_id as u32,
+                        is_restricted: fat_tlm_schema.is_restricted,
+                    }),
                     fields,
                 };
                 (
