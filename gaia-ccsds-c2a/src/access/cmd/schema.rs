@@ -13,6 +13,9 @@ pub struct Metadata {
     pub component_name: String,
     pub command_name: String,
     pub cmd_id: u16,
+    pub is_danger: bool,
+    pub is_restricted: bool,
+    pub target: String,
     pub description: String,
 }
 
@@ -103,6 +106,9 @@ impl<'a> Iterator for Iter<'a> {
                 component_name: self.name.to_string(),
                 command_name: command.name.to_string(),
                 cmd_id: command.code,
+                is_danger: command.is_danger,
+                is_restricted: command.is_restricted,
+                target: command.target.to_string(),
                 description: command.description.to_string(),
             };
             return build_schema(command)

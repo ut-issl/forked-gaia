@@ -45,7 +45,10 @@ message CommandSchema {
 
 message CommandSchemaMetadata {
   uint32 id = 1;
-  string description = 2;
+  bool is_danger = 2;
+  bool is_restricted = 3;
+  string target = 4;
+  string description = 5;
 }
 
 message CommandParameterSchema {

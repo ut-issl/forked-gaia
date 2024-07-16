@@ -157,6 +157,9 @@ impl Registry {
                         let command_schema = proto::CommandSchema {
                             metadata: Some(proto::CommandSchemaMetadata {
                                 id: schema_with_id.command_id as u32,
+                                is_danger: metadata.is_danger,
+                                is_restricted: metadata.is_restricted,
+                                target: metadata.target.clone(),
                                 description: metadata.description.clone(),
                             }),
                             parameters,
