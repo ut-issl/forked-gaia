@@ -18,6 +18,7 @@ use crate::{
 pub struct FatTelemetrySchema {
     component: String,
     telemetry: String,
+    is_restricted: bool,
     pub schema: TelemetrySchema,
 }
 
@@ -214,6 +215,7 @@ impl Registry {
                     FatTelemetrySchema {
                         component: metadata.component_name,
                         telemetry: metadata.telemetry_name,
+                        is_restricted: metadata.is_restricted,
                         schema,
                     },
                 );

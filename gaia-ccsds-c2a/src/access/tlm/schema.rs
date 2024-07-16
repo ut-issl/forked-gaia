@@ -17,7 +17,7 @@ pub struct Metadata {
     pub component_name: String,
     pub telemetry_name: String,
     pub tlm_id: u8,
-    pub is_restriced: bool,
+    pub is_restricted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +111,7 @@ impl<'a> Iterator for TelemetryIter<'a> {
             component_name: self.component_name.to_string(),
             telemetry_name: telemetry.name.to_string(),
             tlm_id: telemetry.metadata.packet_id,
-            is_restriced: telemetry.metadata.is_restricted,
+            is_restricted: telemetry.metadata.is_restricted,
         };
         let fields = Box::new(iter_fields(&telemetry.entries).filter_map(|(obs, field)| {
             build_bit_range(&field.extraction_info).map(|bit_range| (obs, field, bit_range))
