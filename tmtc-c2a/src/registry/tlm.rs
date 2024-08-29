@@ -10,7 +10,7 @@ use gaia_ccsds_c2a::access::tlm::schema::{
 use itertools::Itertools;
 
 use crate::{
-    proto::tmtc_generic_c2a::{self as proto},
+    proto::tmtc_generic_c2a::{self as proto, ConversionHex, ConversionNone},
     satconfig,
 };
 
@@ -58,7 +58,7 @@ pub struct FieldMetadata {
     pub raw_name: String,
     pub description: String,
     pub data_type: DataType,
-    pub is_hex: bool
+    pub conv_type: ConversionType,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +73,19 @@ pub enum DataType {
     Uint64,
     Float,
     Double,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConversionType {
+    None,
+    Hex,
+    Polynomial {
+        coefficients: Vec<f64>,
+    },
+    Status {
+        variants: HashMap<i64,String>,
+        default: Option<String>
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +140,16 @@ impl Registry {
                                 DataType::Float => proto::TelemetryFieldDataType::TlmFieldFloat as i32,
                                 DataType::Double => proto::TelemetryFieldDataType::TlmFieldDouble as i32,
                             },
-                            is_hex: m.is_hex
+                            conv_type: match &m.conv_type {
+                                ConversionType::None => Some(proto::telemetry_field_schema_metadata::ConvType::None(ConversionNone {})),
+                                ConversionType::Hex => Some(proto::telemetry_field_schema_metadata::ConvType::Hex(ConversionHex {})),
+                                ConversionType::Polynomial { coefficients } => Some(
+                                    proto::telemetry_field_schema_metadata::ConvType::Polynomial(proto::ConversionPolynomial { coefficients: coefficients.clone() })
+                                ),
+                                ConversionType::Status { variants, default } => Some(
+                                    proto::telemetry_field_schema_metadata::ConvType::Status(proto::ConversionStatus { variants: variants.clone(), default: default.clone() })
+                                ),
+                            },
                         }),
                         name: m.original_name.to_string(),
                     })
@@ -240,7 +262,7 @@ fn build_telemetry_schema<'a>(
     };
     for (order, pair) in iter.enumerate() {
         let (field_name, field_schema) = pair?;
-        let (data_type, is_hex) = match &field_schema.value {
+        let (data_type, conv_type) = match &field_schema.value {
             FieldValueSchema::Integral(schema) => (
                 match schema.field {
                     structpack::GenericIntegralField::I8(_) => DataType::Int8,
@@ -252,9 +274,16 @@ fn build_telemetry_schema<'a>(
                     structpack::GenericIntegralField::U32(_) => DataType::Uint32,
                     structpack::GenericIntegralField::U64(_) => DataType::Uint64,
                 },
-                match schema.converter {
-                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Hex) => true,
-                    _ => false,
+                match &schema.converter {
+                    None => ConversionType::None,
+                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Hex) => ConversionType::Hex,
+                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Polynomial(poly)) => {
+                        ConversionType::Polynomial { coefficients: poly.to_vec() }
+                    }
+                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Status(status)) => {
+                        let (variants, default) = status.to_map_and_default();
+                        ConversionType::Status { variants, default: Some(default) }
+                    }
                 }
             ),
             FieldValueSchema::Floating(schema) => (
@@ -262,7 +291,10 @@ fn build_telemetry_schema<'a>(
                     structpack::GenericFloatingField::F32(_) => DataType::Float,
                     structpack::GenericFloatingField::F64(_) => DataType::Double,
                 },
-                false,
+                match &schema.converter {
+                    None => ConversionType::None,
+                    Some(poly) => ConversionType::Polynomial { coefficients: poly.to_vec() },
+                },
             )
         };
         let name_pair = build_field_metadata(
@@ -270,7 +302,7 @@ fn build_telemetry_schema<'a>(
             field_name,
             &field_schema.metadata.description,
             data_type,
-            is_hex
+            conv_type
         );
         match field_schema.value {
             FieldValueSchema::Integral(field_schema) => {
@@ -289,7 +321,7 @@ fn build_field_metadata(
     tlmdb_name: &str,
     description: &str,
     data_type: DataType,
-    is_hex: bool,
+    conv_type: ConversionType,
 ) -> FieldMetadata {
     FieldMetadata {
         order,
@@ -298,6 +330,6 @@ fn build_field_metadata(
         raw_name: format!("{tlmdb_name}@RAW"),
         description: description.to_string(),
         data_type,
-        is_hex
+        conv_type
     }
 }

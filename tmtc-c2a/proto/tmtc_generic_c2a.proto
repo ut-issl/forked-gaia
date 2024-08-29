@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package tmtc_generic_c2a;
 
+import "google/protobuf/wrappers.proto";
+
 service TmtcGenericC2a {
   rpc GetSatelliteSchema(GetSatelliteSchemaRequest) returns (GetSateliteSchemaResponse);
 }
@@ -105,7 +107,25 @@ enum TelemetryFieldDataType {
 message TelemetryFieldSchemaMetadata {
   string description = 1;
   TelemetryFieldDataType data_type = 2;
-  bool is_hex = 3;
+  oneof conv_type {
+    ConversionNone none = 3;
+    ConversionHex hex = 4;
+    ConversionPolynomial polynomial = 5;
+    ConversionStatus status = 6;
+  }
+}
+
+message ConversionNone {}
+
+message ConversionHex {}
+
+message ConversionPolynomial {
+  repeated double coefficients = 1;
+}
+
+message ConversionStatus {
+  map<int64, string> variants = 1;
+  google.protobuf.StringValue default = 2;
 }
 
 message TelemetryChannelSchema {

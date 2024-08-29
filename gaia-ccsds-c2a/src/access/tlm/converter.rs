@@ -14,6 +14,10 @@ impl Status {
     pub fn convert(&self, value: i64) -> String {
         self.map.get(&value).unwrap_or(&self.default_label).clone()
     }
+
+    pub fn to_map_and_default(&self) -> (HashMap<i64, String>, String) {
+        (self.map.clone(), self.default_label.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +28,10 @@ pub struct Polynomial {
 impl Polynomial {
     pub fn new(a: [f64; 6]) -> Self {
         Self { a }
+    }
+
+    pub fn to_vec(&self) -> Vec<f64> {
+        self.a.to_vec()
     }
 }
 
