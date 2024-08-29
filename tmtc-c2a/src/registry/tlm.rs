@@ -10,7 +10,7 @@ use gaia_ccsds_c2a::access::tlm::schema::{
 use itertools::Itertools;
 
 use crate::{
-    proto::tmtc_generic_c2a::{self as proto, ConversionHex, ConversionNone},
+    proto::tmtc_generic_c2a::{self as proto, ConversionHex},
     satconfig,
 };
 
@@ -141,7 +141,7 @@ impl Registry {
                                 DataType::Double => proto::TelemetryFieldDataType::TlmFieldDouble as i32,
                             },
                             conv_type: match &m.conv_type {
-                                ConversionType::None => Some(proto::telemetry_field_schema_metadata::ConvType::None(ConversionNone {})),
+                                ConversionType::None => None,
                                 ConversionType::Hex => Some(proto::telemetry_field_schema_metadata::ConvType::Hex(ConversionHex {})),
                                 ConversionType::Polynomial { coefficients } => Some(
                                     proto::telemetry_field_schema_metadata::ConvType::Polynomial(proto::ConversionPolynomial { coefficients: coefficients.clone() })

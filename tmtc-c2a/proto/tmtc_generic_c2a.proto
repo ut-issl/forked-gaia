@@ -108,14 +108,11 @@ message TelemetryFieldSchemaMetadata {
   string description = 1;
   TelemetryFieldDataType data_type = 2;
   oneof conv_type {
-    ConversionNone none = 3;
-    ConversionHex hex = 4;
-    ConversionPolynomial polynomial = 5;
-    ConversionStatus status = 6;
+    ConversionHex hex = 3;
+    ConversionPolynomial polynomial = 4;
+    ConversionStatus status = 5;
   }
 }
-
-message ConversionNone {}
 
 message ConversionHex {}
 
