@@ -121,7 +121,7 @@ message ConversionPolynomial {
 }
 
 message ConversionStatus {
-  map<int64, string> variants = 1;
+  map<string, int64> variants = 1;
   google.protobuf.StringValue default = 2;
 }
 

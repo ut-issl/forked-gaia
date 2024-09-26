@@ -146,9 +146,12 @@ impl Registry {
                                 ConversionType::Polynomial { coefficients } => Some(
                                     proto::telemetry_field_schema_metadata::ConvType::Polynomial(proto::ConversionPolynomial { coefficients: coefficients.clone() })
                                 ),
-                                ConversionType::Status { variants, default } => Some(
-                                    proto::telemetry_field_schema_metadata::ConvType::Status(proto::ConversionStatus { variants: variants.clone(), default: default.clone() })
-                                ),
+                                ConversionType::Status { variants, default } => {
+                                    let variants = variants.iter().map(|(k, v)| (v.clone(), *k)).collect();
+                                    Some(proto::telemetry_field_schema_metadata::ConvType::Status(
+                                        proto::ConversionStatus { variants, default: default.clone() })
+                                    )
+                                }
                             },
                         }),
                         name: m.original_name.to_string(),
