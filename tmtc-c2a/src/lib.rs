@@ -6,5 +6,5 @@ pub mod registry;
 pub mod satellite;
 mod tco;
 mod tmiv;
-mod cop;
-mod tco_tmiv_util;
+pub mod fop;
+pub mod tco_tmiv_util;

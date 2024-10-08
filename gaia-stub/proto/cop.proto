@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package cop;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+import "tco_tmiv.proto";
+
+service Cop {
+  rpc OpenStatusStream(StatusStreamRequest) returns (stream StatusStreamResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc GetAllStatus(GetAllStatusRequest) returns (GetAllStatusResponse);
+  rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
+}
+
+message StatusStreamRequest {
+}
+
+message StatusStreamResponse {
+  CopStatus cop_status = 1;
+}
+
+message GetStatusRequest {
+  google.protobuf.UInt32Value cop_id = 1;
+}
+
+message GetStatusResponse {
+  CopStatus cop_status = 1;
+}
+
+message CopStatus {
+  oneof inner {
+    CopQueueStatus queue_status = 1;
+    CopWorkerStatus worker_status = 2;
+  }
+}
+
+message GetAllStatusRequest {
+}
+
+message GetAllStatusResponse {
+  repeated CopQueueStatus cop_statuses = 1;
+  CopWorkerStatus worker_status = 2;
+}
+
+message PostCommandRequest {
+  CopCommand command = 1;
+}
+
+message PostCommandResponse {
+}
+
+message CopQueueStatus {
+  uint32 cop_id = 1;
+  tco_tmiv.Tco tco = 2;
+  CopQueueStatusPattern status = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+enum CopQueueStatusPattern {
+  PENDING = 0;
+  EXECUTED = 1;
+  ACCEPTED = 2;
+  REJECTED = 3;
+  CANCELED = 4;
+  TIMEOUT = 5;
+  FAILED = 6;
+}
+
+message CopWorkerStatus {
+  CopWorkerStatusPattern status = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+enum CopWorkerStatusPattern {
+  INITIAL = 0;
+  ACTIVATE = 1;
+  LOCKOUT = 2;
+}
+
+message CopCommand {
+  oneof command {
+    InitializeCommand initialize = 1;
+    TerminateCommand terminate = 2;
+    CancelCommand cancel = 3;
+    UnlockCommand unlock = 4;
+    SetTimeoutCommand set_timeout = 5;
+  }
+}
+
+message InitializeCommand {
+}
+
+message TerminateCommand {
+}
+
+message CancelCommand {
+}
+
+message UnlockCommand {
+}
+
+message SetTimeoutCommand {
+  uint32 timeout = 1;
+}
+
+

@@ -43,13 +43,13 @@ impl FromStr for TcoName {
 }
 
 #[derive(Debug, Clone)]
-pub struct FatCommandSchema<'a> {
+pub struct FatCommandSchema {
     pub apid: u16,
     pub command_id: u16,
     pub destination_type: u8,
     pub execution_type: u8,
     pub has_time_indicator: bool,
-    pub schema: &'a CommandSchema,
+    pub schema: CommandSchema,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +201,7 @@ impl Registry {
             destination_type: *destination_type,
             execution_type: *execution_type,
             has_time_indicator: *has_time_indicator,
-            schema,
+            schema: schema.clone(),
         })
     }
 
