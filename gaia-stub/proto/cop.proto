@@ -64,7 +64,8 @@ enum CopQueueStatusPattern {
   REJECTED = 3;
   CANCELED = 4;
   TIMEOUT = 5;
-  FAILED = 6;
+  LOCKOUT = 6;
+  FAILED = 7;
 }
 
 message CopWorkerStatus {
@@ -73,35 +74,37 @@ message CopWorkerStatus {
 }
 
 enum CopWorkerStatusPattern {
-  INITIAL = 0;
-  ACTIVATE = 1;
-  LOCKOUT = 2;
+  WORKER_IDLE = 0;
+  WORKER_INITIALIZE = 1;
+  WORKER_ACTIVE = 2;
+  WORKER_LOCKOUT = 3;
+  WORKER_UNLOCKING = 4;
+  WORKER_TIMEOUT = 5;
+  WORKER_FAILED = 6;
+  WORKER_CANCELED = 7;
 }
 
 message CopCommand {
   oneof command {
     InitializeCommand initialize = 1;
     TerminateCommand terminate = 2;
-    CancelCommand cancel = 3;
-    UnlockCommand unlock = 4;
-    SetTimeoutCommand set_timeout = 5;
+    UnlockCommand unlock = 3;
+    SetTimeoutCommand set_timeout = 4;
   }
 }
 
 message InitializeCommand {
+  uint32 vsvr = 1;
 }
 
 message TerminateCommand {
-}
-
-message CancelCommand {
 }
 
 message UnlockCommand {
 }
 
 message SetTimeoutCommand {
-  uint32 timeout = 1;
+  uint32 timeout_sec = 1;
 }
 
 

@@ -145,7 +145,7 @@ async fn main() -> Result<()> {
     let (link, socket) = kble_gs::new();
     let kble_socket_fut = socket.serve((args.kble_addr, args.kble_port));
 
-    let (satellite_svc, sat_tlm_reporter, fop_worker, cop_command_svc) = fop::new(
+    let (satellite_svc, sat_tlm_reporter, fop_worker, cop_command_svc, cop_reporter) = fop::new(
         satconfig.aos_scid,
         satconfig.tc_scid,
         tlm_registry,
@@ -155,7 +155,9 @@ async fn main() -> Result<()> {
     );
     let sat_tlm_reporter_task = sat_tlm_reporter.run(tlm_handler.clone());
 
-    let cop_command_task = fop_worker.run(cop_status_handler.clone(), tlm_handler);
+    let cop_reporter_task = cop_reporter.run(tlm_handler.clone(), cop_status_handler.clone());
+
+    let cop_command_task = fop_worker.run();
 
     let cmd_handler = handler::Builder::new()
         .option_layer(recorder_layer.clone())
@@ -217,5 +219,6 @@ async fn main() -> Result<()> {
         ret = cop_command_task => Ok(ret?),
         ret = kble_socket_fut => Ok(ret?),
         ret = server_task => Ok(ret?),
+        ret = cop_reporter_task => Ok(ret?),
     }
 }

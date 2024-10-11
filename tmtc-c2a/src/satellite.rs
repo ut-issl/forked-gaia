@@ -16,7 +16,7 @@ use gaia_ccsds_c2a::{
 use gaia_tmtc::{
     cop::CopCommand, tco_tmiv::{Tco, Tmiv}, Handle
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, warn};
 
 pub struct TmivBuilder {
@@ -163,29 +163,35 @@ impl FopReceiver {
 }
 
 pub fn create_clcw_channel() -> (CLCWSender, CLCWReceiver) {
-    let (tx, rx) = mpsc::channel(16);
+    let (tx, rx) = broadcast::channel(16);
     (CLCWSender { tx }, CLCWReceiver { rx })
 }
 
 #[derive(Clone)]
 pub struct CLCWSender {
-    tx: mpsc::Sender<CLCW>,
+    tx: broadcast::Sender<CLCW>,
 }
 
 impl CLCWSender {
     pub async fn send(&self, clcw: CLCW) -> Result<()> {
-        self.tx.send(clcw).await?;
+        self.tx.send(clcw)?;
         Ok(())
+    }
+
+    pub fn subscribe(&self) -> CLCWReceiver {
+        CLCWReceiver {
+            rx: self.tx.subscribe(),
+        }
     }
 }
 
 pub struct CLCWReceiver {
-    rx: mpsc::Receiver<CLCW>,
+    rx: broadcast::Receiver<CLCW>,
 }
 
 impl CLCWReceiver {
     pub async fn recv(&mut self) -> Option<CLCW> {
-        self.rx.recv().await
+        self.rx.recv().await.ok()
     }
 }
 
