@@ -1,33 +1,41 @@
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
-use gaia_tmtc::tco_tmiv::{tmiv, tmiv_field, TmivField};
+use gaia_tmtc::tco_tmiv::{tmiv_field, TmivField};
 
-pub fn field_schema_int(name: &str) -> tmiv::FieldSchema {
-    tmiv::FieldSchema {
+use crate::proto::tmtc_generic_c2a::{telemetry_field_schema_metadata, ConversionStatus, TelemetryFieldDataType, TelemetryFieldSchema, TelemetryFieldSchemaMetadata};
+
+pub fn field_schema_int(name: &str, desctiprion: &str) -> TelemetryFieldSchema {
+    TelemetryFieldSchema {
+        metadata: Some(TelemetryFieldSchemaMetadata {
+            description: desctiprion.to_string(),
+            data_type: TelemetryFieldDataType::TlmFieldInt32 as i32,
+            conv_type: None,
+        }),
         name: name.to_string(),
-        data_type: tmiv::DataType::INTEGER,
-        variants: vec![],
     }
 }
 
-pub fn field_schema_double(name: &str) -> tmiv::FieldSchema {
-    tmiv::FieldSchema {
+pub fn field_schema_double(name: &str, desctiprion: &str) -> TelemetryFieldSchema {
+    TelemetryFieldSchema {
+        metadata: Some(TelemetryFieldSchemaMetadata {
+            description: desctiprion.to_string(),
+            data_type: TelemetryFieldDataType::TlmFieldDouble as i32,
+            conv_type: None,
+        }),
         name: name.to_string(),
-        data_type: tmiv::DataType::DOUBLE,
-        variants: vec![],
     }
 }
 
-pub fn field_schema_enum(name: &str, variants: &[&str]) -> tmiv::FieldSchema {
-    tmiv::FieldSchema {
+pub fn field_schema_enum(name: &str, desctiprion: &str, variants: HashMap<String, i64>, default: Option<String>) -> TelemetryFieldSchema {
+    TelemetryFieldSchema {
+        metadata: Some(TelemetryFieldSchemaMetadata {
+            description: desctiprion.to_string(),
+            data_type: TelemetryFieldDataType::TlmFieldInt32 as i32,
+            conv_type: Some(telemetry_field_schema_metadata::ConvType::Status(ConversionStatus { 
+                variants, default 
+            })),
+        }),
         name: name.to_string(),
-        data_type: tmiv::DataType::ENUM,
-        variants: variants
-            .iter()
-            .map(|name| tmiv::Variant {
-                name: name.to_string(),
-            })
-            .collect(),
     }
 }
 

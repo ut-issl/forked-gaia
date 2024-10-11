@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -7,13 +8,14 @@ use anyhow::{anyhow, Result};
 use gaia_ccsds_c2a::ccsds::tc::sync_and_channel_coding::FrameType;
 use gaia_ccsds_c2a::ccsds::{tc::{self, clcw::CLCW}, aos, tc::SyncAndChannelCoding};
 use gaia_tmtc::cop::cop_status::Inner;
-use gaia_tmtc::tco_tmiv::{tmiv, Tco, Tmiv, TmivField};
+use gaia_tmtc::tco_tmiv::{Tco, Tmiv, TmivField};
 use gaia_tmtc::cop::{cop_command, CopCommand, CopQueueStatus, CopQueueStatusPattern, CopStatus, CopWorkerStatus, CopWorkerStatusPattern};
 use gaia_tmtc::Handle;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use async_trait::async_trait;
 use tracing::error;
 
+use crate::proto::tmtc_generic_c2a::{TelemetryChannelSchema, TelemetryChannelSchemaMetadata, TelemetryComponentSchema, TelemetryComponentSchemaMetadata, TelemetrySchema, TelemetrySchemaMetadata};
 use crate::satellite::{self, create_clcw_channel, create_cop_command_channel, create_fop_channel, CLCWReceiver, CommandContext, CopCommandReceiver, CopCommandSender, FopCommandId, TelemetryReporter, TmivBuilder};
 use crate::tco_tmiv_util::{field_optenum, field_optint, field_schema_enum, field_schema_int};
 use crate::{satellite::FopReceiver, tco_tmiv_util::{field_enum, field_int}};
@@ -856,37 +858,181 @@ impl Display for State {
     }
 }
 
+const TMIV_DESTINATION_TYPE: &str = "RT";
+const TMIV_COMPONENT_NAME: &str = "GAIA";
 const WORKER_TMIV_NAME: &str = "GAIA.FOP";
 const CLCW_TMIV_NAME: &str = "GAIA.CLCW";
 
-pub fn tmiv_schema_set() -> Vec<tmiv::Schema> {
-    vec![
-        tmiv::Schema {
-            name: WORKER_TMIV_NAME.to_string(),
-            fields: vec![
-                field_schema_enum("FOP1_STATE", &["IDLE", "INITIAL", "ACTIVE", "LOCKOUT", "TIMEOUT", "FAILED"]),
-                field_schema_int("FOP1_VS"),
-                field_schema_int("ID_OFFSET_FROM_VS"),
-            ]
+pub fn build_telemetry_channel_schema_map() -> HashMap<String, TelemetryChannelSchema> {
+    vec![(
+        TMIV_DESTINATION_TYPE.to_string(),
+        TelemetryChannelSchema {
+            metadata: Some(TelemetryChannelSchemaMetadata {
+                destination_flag_mask: 0,
+            }),
         },
-        tmiv::Schema {
-            name: CLCW_TMIV_NAME.to_string(),
-            fields: vec![
-                field_schema_int("CLCW_CONTROL_WORD_TYPE"),
-                field_schema_int("CLCW_VERSION_NUMBER"),
-                field_schema_int("CLCW_STATUS_FIELD"),
-                field_schema_int("CLCW_COP_IN_EFFECT"),
-                field_schema_int("CLCW_VCID"),
-                field_schema_int("CLCW_NO_RF_AVAILABLE"),
-                field_schema_int("CLCW_NO_BIT_LOCK"),
-                field_schema_int("CLCW_LOCKOUT"),
-                field_schema_int("CLCW_WAIT"),
-                field_schema_int("CLCW_RETRANSMIT"),
-                field_schema_int("CLCW_FARM_B_COUNTER"),
-                field_schema_int("CLCW_REPORT_VALUE"),
-            ],
-        }
-    ]
+    )]
+    .into_iter()
+    .collect()
+}
+
+pub fn build_telemetry_component_schema_map() -> HashMap<String, TelemetryComponentSchema> {
+    vec![
+        (
+            TMIV_COMPONENT_NAME.to_string(),
+            TelemetryComponentSchema {
+                metadata: Some(TelemetryComponentSchemaMetadata { apid: 0 }),
+                telemetries: vec![
+                    (
+                        WORKER_TMIV_NAME.to_string(),
+                        TelemetrySchema {
+                            metadata: Some(TelemetrySchemaMetadata {
+                                id: 0,
+                                is_restricted: false,
+                            }),
+                            fields: vec!
+                            [
+                                field_schema_enum(
+                                    "FOP1_STATE", 
+                                    "FOPの状態",
+                                    vec![
+                                        ("IDLE".to_string(), 0),
+                                        ("INITIALIZE".to_string(), 1), 
+                                        ("ACTIVE".to_string(), 2), 
+                                        ("LOCKOUT".to_string(), 3), 
+                                        ("UNLOCKING".to_string(), 4), 
+                                        ("TIMEOUT".to_string(), 5), 
+                                        ("FAILED".to_string(), 6), 
+                                        ("CANCELED".to_string(), 7)
+                                    ].into_iter().collect(),
+                                    None,
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.PENDING.NUMBER",
+                                    "待機状態のコマンド数",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.PENDING.FRONT_ID",
+                                    "待機状態の先頭コマンドID",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.PENDING.FRONT_VS",
+                                    "待機状態の先頭コマンドVS",
+                                ),
+                                field_schema_enum(
+                                    "FOP1_QUEUE.PENDING.FRONT_TCO_NAME", 
+                                    "待機状態の先頭コマンドTCO名",
+                                    HashMap::new(),
+                                    None,
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.EXECUTED.NUMBER",
+                                    "実行済のコマンド数",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.EXECUTED.FRONT_ID",
+                                    "実行済の先頭コマンドID",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.EXECUTED.FRONT_VS",
+                                    "実行済の先頭コマンドVS",
+                                ),
+                                field_schema_enum(
+                                    "FOP1_QUEUE.EXECUTED.FRONT_TCO_NAME",
+                                    "実行済の先頭コマンドTCO名",
+                                    HashMap::new(),
+                                    None,
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.REJECTED.NUMBER",
+                                    "再送待ちのコマンド数",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.REJECTED.FRONT_ID",
+                                    "再送待ちの先頭コマンドID",
+                                ),
+                                field_schema_int(
+                                    "FOP1_QUEUE.REJECTED.FRONT_VS",
+                                    "再送待ちの先頭コマンドVS",
+                                ),
+                                field_schema_enum(
+                                    "FOP1_QUEUE.REJECTED.FRONT_TCO_NAME",
+                                    "再送待ちの先頭コマンドTCO名",
+                                    HashMap::new(),
+                                    None,
+                                ),
+                                field_schema_enum(
+                                    "FOP1_QUEUE.OLDEST_TIME",
+                                    "先頭コマンドの受信時刻",
+                                    HashMap::new(),
+                                    None,
+                                ),
+                            ],
+                        },
+                    ),
+                    (
+                        CLCW_TMIV_NAME.to_string(),
+                        TelemetrySchema {
+                            metadata: Some(TelemetrySchemaMetadata {
+                                id: 0,
+                                is_restricted: false,
+                            }),
+                            fields: vec![
+                                field_schema_int(
+                                    "CLCW_CONTROL_WORD_TYPE",
+                                    "CLCWの制御ワードタイプ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_VERSION_NUMBER",
+                                    "CLCWのバージョン番号",
+                                ),
+                                field_schema_int(
+                                    "CLCW_STATUS_FIELD",
+                                    "CLCWのステータスフィールド",
+                                ),
+                                field_schema_int(
+                                    "CLCW_COP_IN_EFFECT",
+                                    "CLCWのCOP有効フラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_VCID",
+                                    "CLCWのVCID",
+                                ),
+                                field_schema_int(
+                                    "CLCW_NO_RF_AVAILABLE",
+                                    "CLCWのRF利用不可フラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_NO_BIT_LOCK",
+                                    "CLCWのビットロック不可フラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_LOCKOUT",
+                                    "CLCWのロックアウトフラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_WAIT",
+                                    "CLCWのウェイトフラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_RETRANSMIT",
+                                    "CLCWの再送信フラグ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_FARM_B_COUNTER",
+                                    "CLCWのFARM-Bカウンタ",
+                                ),
+                                field_schema_int(
+                                    "CLCW_REPORT_VALUE",
+                                    "CLCWのVR値",
+                                ),
+                            ],
+                        }
+                    )
+                ].into_iter().collect(),
+            }
+        ),
+    ].into_iter().collect()
 }
 
 pub fn build_tmiv_fields_from_fop(fields: &mut Vec<TmivField>, state: State, queue: &FopQueueStatus) {
@@ -903,6 +1049,8 @@ pub fn build_tmiv_fields_from_fop(fields: &mut Vec<TmivField>, state: State, que
     fields.push(field_optint("FOP1_QUEUE.REJECTED.FRONT_ID", queue.rejected.front_id));
     fields.push(field_optint("FOP1_QUEUE.REJECTED.FRONT_VS", queue.rejected.front_vs));
     fields.push(field_optenum("FOP1_QUEUE.REJECTED.FRONT_TCO_NAME", queue.rejected.front_tco_name.clone()));
+    let oldest_time: Option<chrono::DateTime<chrono::Local>>  = queue.oldest_time.map(|time| time.into());
+    fields.push(field_optenum("FOP1_QUEUE.OLDEST_TIME", oldest_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())));
 }
 
 pub fn build_tmiv_fields_from_clcw(fields: &mut Vec<TmivField>, clcw: &CLCW) {
