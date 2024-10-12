@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package cop;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+import "tco_tmiv.proto";
+
+service Cop {
+  rpc OpenStatusStream(StatusStreamRequest) returns (stream StatusStreamResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc GetAllStatus(GetAllStatusRequest) returns (GetAllStatusResponse);
+  rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
+}
+
+message StatusStreamRequest {
+}
+
+message StatusStreamResponse {
+  CopStatus cop_status = 1;
+}
+
+message GetStatusRequest {
+  google.protobuf.UInt32Value cop_id = 1;
+}
+
+message GetStatusResponse {
+  CopStatus cop_status = 1;
+}
+
+message CopStatus {
+  oneof inner {
+    CopQueueStatus queue_status = 1;
+    CopWorkerStatus worker_status = 2;
+  }
+}
+
+message GetAllStatusRequest {
+}
+
+message GetAllStatusResponse {
+  repeated CopQueueStatus cop_statuses = 1;
+  CopWorkerStatus worker_status = 2;
+}
+
+message PostCommandRequest {
+  CopCommand command = 1;
+}
+
+message PostCommandResponse {
+}
+
+message CopQueueStatus {
+  uint32 cop_id = 1;
+  tco_tmiv.Tco tco = 2;
+  CopQueueStatusPattern status = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+enum CopQueueStatusPattern {
+  PENDING = 0;
+  EXECUTED = 1;
+  ACCEPTED = 2;
+  REJECTED = 3;
+  CANCELED = 4;
+  TIMEOUT = 5;
+  LOCKOUT = 6;
+  FAILED = 7;
+}
+
+message CopWorkerStatus {
+  CopWorkerStatusPattern status = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+enum CopWorkerStatusPattern {
+  WORKER_IDLE = 0;
+  WORKER_INITIALIZE = 1;
+  WORKER_ACTIVE = 2;
+  WORKER_LOCKOUT = 3;
+  WORKER_UNLOCKING = 4;
+  WORKER_TIMEOUT = 5;
+  WORKER_FAILED = 6;
+  WORKER_CANCELED = 7;
+}
+
+message CopCommand {
+  oneof command {
+    InitializeCommand initialize = 1;
+    TerminateCommand terminate = 2;
+    UnlockCommand unlock = 3;
+    SetTimeoutCommand set_timeout = 4;
+  }
+}
+
+message InitializeCommand {
+  uint32 vsvr = 1;
+}
+
+message TerminateCommand {
+}
+
+message UnlockCommand {
+}
+
+message SetTimeoutCommand {
+  uint32 timeout_sec = 1;
+}
+
+

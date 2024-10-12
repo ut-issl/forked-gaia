@@ -3,11 +3,14 @@ syntax = "proto3";
 package recorder;
 
 import "tco_tmiv.proto";
+import "cop.proto";
 import "google/protobuf/timestamp.proto";
 
 service Recorder {
   rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
   rpc PostTelemetry(PostTelemetryRequest) returns (PostTelemetryResponse);
+  rpc PostCopStatus(PostCopStatusRequest) returns (PostCopStatusResponse);
+  rpc PostCopCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }
 
 message PostCommandRequest {
@@ -23,4 +26,18 @@ message PostTelemetryRequest {
 }
 
 message PostTelemetryResponse {
+}
+
+message PostCopStatusRequest {
+  cop.CopStatus cop_status = 1;
+}
+
+message PostCopStatusResponse {
+}
+
+message PostCopCommandRequest {
+  cop.CopCommand command = 1;
+}
+
+message PostCopCommandResponse {
 }

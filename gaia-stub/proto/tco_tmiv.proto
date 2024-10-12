@@ -7,6 +7,7 @@ import "google/protobuf/timestamp.proto";
 message Tco {
   string name = 1;
   repeated TcoParam params = 2;
+  bool is_type_ad = 3;
 }
 
 message TcoParam {

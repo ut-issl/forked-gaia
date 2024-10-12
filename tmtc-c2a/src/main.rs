@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use axum::ServiceExt;
 use clap::Parser;
 use gaia_tmtc::broker::broker_server::BrokerServer;
+use gaia_tmtc::cop::cop_server::CopServer;
+use gaia_tmtc::cop::{self, CopService};
 use gaia_tmtc::recorder::recorder_client::RecorderClient;
 use gaia_tmtc::recorder::RecordHook;
 use gaia_tmtc::BeforeHookLayer;
@@ -27,7 +29,7 @@ use tower_http::trace::TraceLayer;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use tmtc_c2a::{kble_gs, proto, registry, satellite, Satconfig};
+use tmtc_c2a::{kble_gs, proto, registry, fop, Satconfig};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -131,10 +133,19 @@ async fn main() -> Result<()> {
         .option_layer(recorder_layer.clone())
         .build(tlm_bus.clone());
 
+    let cop_bus = cop::Bus::new(20);
+
+    let cop_status_store = Arc::new(cop::CopStatusStore::new(40));
+    let store_cop_status_hook = cop::StoreCopStatusHook::new(cop_status_store.clone());
+    let cop_status_handler = handler::Builder::new()
+        .before_hook(store_cop_status_hook)
+        .option_layer(recorder_layer.clone())
+        .build(cop_bus.clone());
+
     let (link, socket) = kble_gs::new();
     let kble_socket_fut = socket.serve((args.kble_addr, args.kble_port));
 
-    let (satellite_svc, sat_tlm_reporter) = satellite::new(
+    let (satellite_svc, sat_tlm_reporter, fop_worker, cop_command_svc, cop_reporter) = fop::new(
         satconfig.aos_scid,
         satconfig.tc_scid,
         tlm_registry,
@@ -144,14 +155,25 @@ async fn main() -> Result<()> {
     );
     let sat_tlm_reporter_task = sat_tlm_reporter.run(tlm_handler.clone());
 
+    let cop_reporter_task = cop_reporter.run(tlm_handler.clone(), cop_status_handler.clone());
+
+    let cop_command_task = fop_worker.run();
+
     let cmd_handler = handler::Builder::new()
-        .option_layer(recorder_layer)
+        .option_layer(recorder_layer.clone())
         .build(satellite_svc);
+
+    let cop_handler = handler::Builder::new()
+        .option_layer(recorder_layer)
+        .build(cop_command_svc);
 
     // Constructing gRPC services
     let server_task = {
-        let broker_service = BrokerService::new(cmd_handler, tlm_bus, last_tmiv_store);
+        let broker_service = BrokerService::new(cmd_handler, tlm_bus, last_tmiv_store, 
+        );
         let broker_server = BrokerServer::new(broker_service);
+        let cop_service = CopService::new(cop_handler, cop_bus, cop_status_store);
+        let cop_server = CopServer::new(cop_service);
 
         let tmtc_generic_c2a_server = TmtcGenericC2aServer::new(tmtc_generic_c2a_service);
 
@@ -161,6 +183,7 @@ async fn main() -> Result<()> {
         }
         set_serving(&mut health_reporter, &broker_server).await;
         set_serving(&mut health_reporter, &tmtc_generic_c2a_server).await;
+        set_serving(&mut health_reporter, &cop_server).await;
         let grpc_web_layer = GrpcWebLayer::new();
         let cors_layer = CorsLayer::new()
             .allow_methods([http::Method::GET, http::Method::POST])
@@ -193,7 +216,9 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         ret = sat_tlm_reporter_task => Ok(ret?),
+        ret = cop_command_task => Ok(ret?),
         ret = kble_socket_fut => Ok(ret?),
         ret = server_task => Ok(ret?),
+        ret = cop_reporter_task => Ok(ret?),
     }
 }

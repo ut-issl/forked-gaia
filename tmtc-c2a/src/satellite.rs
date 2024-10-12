@@ -1,14 +1,12 @@
 use std::{sync::Arc, time};
 
 use crate::{
-    registry::{CommandRegistry, FatCommandSchema, TelemetryRegistry},
-    tco::{self, ParameterListWriter},
-    tmiv,
+    registry::{CommandRegistry, FatCommandSchema, TelemetryRegistry}, tco::{self, ParameterListWriter}, tmiv
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use gaia_ccsds_c2a::{
-    ccsds::{self, aos, tc},
+    ccsds::{self, aos, tc::{self, clcw::CLCW}},
     ccsds_c2a::{
         self,
         aos::{virtual_channel::Demuxer, SpacePacket},
@@ -16,16 +14,20 @@ use gaia_ccsds_c2a::{
     },
 };
 use gaia_tmtc::{
-    tco_tmiv::{Tco, Tmiv},
-    Handle,
+    cop::CopCommand, tco_tmiv::{Tco, Tmiv}, Handle
 };
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, warn};
 
-struct TmivBuilder {
+pub struct TmivBuilder {
     tlm_registry: TelemetryRegistry,
 }
 
 impl TmivBuilder {
+    pub fn new(tlm_registry: TelemetryRegistry) -> Self {
+        Self { tlm_registry }
+    }
+
     fn build(
         &self,
         plugin_received_time: time::SystemTime,
@@ -64,21 +66,22 @@ impl TmivBuilder {
     }
 }
 
-struct CommandContext<'a> {
+#[derive(Clone)]
+pub struct CommandContext {
     tc_scid: u16,
-    fat_schema: FatCommandSchema<'a>,
-    tco: &'a Tco,
+    fat_schema: FatCommandSchema,
+    pub tco: Arc<Tco>,
 }
 
-impl<'a> CommandContext<'a> {
+impl CommandContext {
     fn build_tc_segment(&self, data_field_buf: &mut [u8]) -> Result<usize> {
         let mut segment = segment::Builder::new(data_field_buf).unwrap();
         segment.use_default();
 
         let space_packet_bytes = segment.body_mut();
         let mut space_packet = space_packet::Builder::new(&mut space_packet_bytes[..]).unwrap();
-        let tco_reader = tco::Reader::new(self.tco);
-        let params_writer = ParameterListWriter::new(self.fat_schema.schema);
+        let tco_reader = tco::Reader::new(&self.tco);
+        let params_writer = ParameterListWriter::new(&self.fat_schema.schema);
         space_packet.use_default();
         let ph = space_packet.ph_mut();
         ph.set_version_number(0); // always zero
@@ -101,13 +104,24 @@ impl<'a> CommandContext<'a> {
         Ok(segment_len)
     }
 
-    async fn transmit_to<T>(&self, sync_and_channel_coding: &mut T) -> Result<()>
+    pub async fn transmit_to<T>(&self, sync_and_channel_coding: &mut T, vs: Option<u8>) -> Result<()>
     where
         T: tc::SyncAndChannelCoding,
     {
         let vcid = 0; // FIXME: make this configurable
-        let frame_type = tc::sync_and_channel_coding::FrameType::TypeBD;
-        let sequence_number = 0; // In case of Type-BD, it's always zero.
+
+        let (frame_type, sequence_number) = match (self.tco.is_type_ad, vs) {
+            (true, Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
+            (false, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
+            (true, None) => {
+                return Err(anyhow!("VS is required for Type-AD"));
+            },
+            (false, Some(_)) => {
+                warn!("VS is not allowed for Type-BD. Ignoring VS.");
+                (tc::sync_and_channel_coding::FrameType::TypeBD, 0)
+            }
+        };
+
         let mut data_field = vec![0u8; 1017]; // FIXME: hard-coded max size
         let segment_len = self.build_tc_segment(&mut data_field)?;
         data_field.truncate(segment_len);
@@ -118,67 +132,132 @@ impl<'a> CommandContext<'a> {
     }
 }
 
-#[derive(Clone)]
-pub struct Service<T> {
-    sync_and_channel_coding: T,
-    registry: Arc<CommandRegistry>,
-    tc_scid: u16,
+pub type FopCommandId = u32;
+
+pub fn create_fop_channel() -> (FopSender, FopReceiver) {
+    let (tx, rx) = mpsc::channel(256);
+    (FopSender { tx }, FopReceiver { rx })
 }
 
-impl<T> Service<T>
-where
-    T: tc::SyncAndChannelCoding,
-{
-    async fn try_handle_command(&mut self, tco: &Tco) -> Result<bool> {
+#[derive(Clone)]
+pub struct FopSender {
+    tx: mpsc::Sender<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)>,
+}
+
+impl FopSender {
+    pub async fn send(&self, ctx: CommandContext) -> Result<Result<Option<FopCommandId>>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send((ctx, tx)).await?;
+        Ok(rx.await?)
+    }
+}
+
+pub struct FopReceiver {
+    rx: mpsc::Receiver<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)>,
+}
+
+impl FopReceiver {
+    pub async fn recv(&mut self) -> Option<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)> {
+        self.rx.recv().await
+    }
+}
+
+pub fn create_clcw_channel() -> (CLCWSender, CLCWReceiver) {
+    let (tx, rx) = broadcast::channel(16);
+    (CLCWSender { tx }, CLCWReceiver { rx })
+}
+
+#[derive(Clone)]
+pub struct CLCWSender {
+    tx: broadcast::Sender<CLCW>,
+}
+
+impl CLCWSender {
+    pub async fn send(&self, clcw: CLCW) -> Result<()> {
+        self.tx.send(clcw)?;
+        Ok(())
+    }
+
+    pub fn subscribe(&self) -> CLCWReceiver {
+        CLCWReceiver {
+            rx: self.tx.subscribe(),
+        }
+    }
+}
+
+pub struct CLCWReceiver {
+    rx: broadcast::Receiver<CLCW>,
+}
+
+impl CLCWReceiver {
+    pub async fn recv(&mut self) -> Option<CLCW> {
+        self.rx.recv().await.ok()
+    }
+}
+
+pub fn create_cop_command_channel() -> (CopCommandSender, CopCommandReceiver) {
+    let (tx, rx) = mpsc::channel(16);
+    (CopCommandSender { tx }, CopCommandReceiver { rx })
+}
+
+pub struct CopCommandSender {
+    tx: mpsc::Sender<(CopCommand, oneshot::Sender<Result<bool>>)>,
+}
+
+impl CopCommandSender {
+    pub async fn send(&self, command: CopCommand) -> Result<Result<bool>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send((command, tx)).await?;
+        Ok(rx.await?)
+    }
+}
+
+pub struct CopCommandReceiver {
+    rx: mpsc::Receiver<(CopCommand, oneshot::Sender<Result<bool>>)>,
+}
+
+impl CopCommandReceiver {
+    pub async fn recv(&mut self) -> Option<(CopCommand, oneshot::Sender<Result<bool>>)> {
+        self.rx.recv().await
+    }
+}
+
+#[derive(Clone)]
+pub struct Service {
+    registry: Arc<CommandRegistry>,
+    tc_scid: u16,
+    cop_tx: FopSender,
+}
+
+impl Service {
+    pub fn new(registry: Arc<CommandRegistry>, tc_scid: u16, cop_tx: FopSender) -> Self {
+        Self {
+            registry,
+            tc_scid,
+            cop_tx,
+        }
+    }
+
+    async fn try_handle_command(&mut self, tco: Arc<Tco>) -> Result<Option<FopCommandId>> {
         let Some(fat_schema) = self.registry.lookup(&tco.name) else {
-            return Ok(false);
+            return Err(anyhow!("unknown command: {}" ,tco.name));
         };
         let ctx = CommandContext {
             tc_scid: self.tc_scid,
             fat_schema,
             tco,
         };
-        ctx.transmit_to(&mut self.sync_and_channel_coding).await?;
-        Ok(true)
+        let response = self.cop_tx.send(ctx).await??;
+        Ok(response)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn new<T, R>(
-    aos_scid: u8,
-    tc_scid: u16,
-    tlm_registry: TelemetryRegistry,
-    cmd_registry: impl Into<Arc<CommandRegistry>>,
-    receiver: R,
-    transmitter: T,
-) -> (Service<T>, TelemetryReporter<R>)
-where
-    T: tc::SyncAndChannelCoding,
-    R: aos::SyncAndChannelCoding,
-{
-    (
-        Service {
-            tc_scid,
-            sync_and_channel_coding: transmitter,
-            registry: cmd_registry.into(),
-        },
-        TelemetryReporter {
-            aos_scid,
-            receiver,
-            tmiv_builder: TmivBuilder { tlm_registry },
-        },
-    )
-}
-
 #[async_trait]
-impl<T> Handle<Arc<Tco>> for Service<T>
-where
-    T: tc::SyncAndChannelCoding + Clone + Send + Sync + 'static,
-{
-    type Response = Option<()>;
+impl Handle<Arc<Tco>> for Service {
+    type Response = Option<FopCommandId>;
 
     async fn handle(&mut self, tco: Arc<Tco>) -> Result<Self::Response> {
-        Ok(self.try_handle_command(&tco).await?.then_some(()))
+        Ok(self.try_handle_command(tco).await?)
     }
 }
 
@@ -187,12 +266,22 @@ pub struct TelemetryReporter<R> {
     aos_scid: u8,
     tmiv_builder: TmivBuilder,
     receiver: R,
+    clcw_tx: CLCWSender,
 }
 
 impl<R> TelemetryReporter<R>
 where
     R: aos::SyncAndChannelCoding,
 {
+    pub fn new(aos_scid: u8, receiver: R, tmiv_builder: TmivBuilder, clcw_tx: CLCWSender) -> Self {
+        Self {
+            aos_scid,
+            receiver,
+            tmiv_builder,
+            clcw_tx,
+        }
+    }
+
     pub async fn run<H>(mut self, mut tlm_handler: H) -> Result<()>
     where
         H: Handle<Arc<Tmiv>, Response = ()>,
@@ -217,6 +306,7 @@ where
                 continue;
             }
             let vcid = tf.primary_header.vcid();
+            self.clcw_tx.send(tf.trailer.clone()).await?;
             let channel = demuxer.demux(vcid);
             let frame_count = tf.primary_header.frame_count();
             if let Err(expected) = channel.synchronizer.next(frame_count) {
