@@ -14,7 +14,7 @@ use gaia_ccsds_c2a::{
     },
 };
 use gaia_tmtc::{
-    cop::CopCommand, tco_tmiv::{Tco, Tmiv}, Handle
+    cop::{CopCommand, IsTimeout}, tco_tmiv::{Tco, Tmiv}, Handle
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -195,17 +195,27 @@ impl CLCWReceiver {
     }
 }
 
+pub struct TimeOutResponse {
+    pub is_timeout: bool,
+}
+
+impl IsTimeout for TimeOutResponse {
+    fn is_timeout(&self) -> bool {
+        self.is_timeout
+    }
+}
+
 pub fn create_cop_command_channel() -> (CopCommandSender, CopCommandReceiver) {
     let (tx, rx) = mpsc::channel(16);
     (CopCommandSender { tx }, CopCommandReceiver { rx })
 }
 
 pub struct CopCommandSender {
-    tx: mpsc::Sender<(CopCommand, oneshot::Sender<Result<bool>>)>,
+    tx: mpsc::Sender<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)>,
 }
 
 impl CopCommandSender {
-    pub async fn send(&self, command: CopCommand) -> Result<Result<bool>> {
+    pub async fn send(&self, command: CopCommand) -> Result<Result<TimeOutResponse>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send((command, tx)).await?;
         Ok(rx.await?)
@@ -213,11 +223,11 @@ impl CopCommandSender {
 }
 
 pub struct CopCommandReceiver {
-    rx: mpsc::Receiver<(CopCommand, oneshot::Sender<Result<bool>>)>,
+    rx: mpsc::Receiver<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)>,
 }
 
 impl CopCommandReceiver {
-    pub async fn recv(&mut self) -> Option<(CopCommand, oneshot::Sender<Result<bool>>)> {
+    pub async fn recv(&mut self) -> Option<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)> {
         self.rx.recv().await
     }
 }

@@ -155,11 +155,15 @@ impl<C> CopService<C> {
     }
 }
 
+pub trait IsTimeout {
+    fn is_timeout(&self) -> bool;
+}
+
 #[tonic::async_trait]
 impl<C> Cop for CopService<C> 
 where
     C: super::Handle<Arc<CopCommand>> + Send + Sync + 'static,
-    C::Response: Send + Into<bool> + 'static,
+    C::Response: Send + IsTimeout + 'static,
 {
     type OpenStatusStreamStream = stream::BoxStream<'static, Result<StatusStreamResponse, Status>>;
     
@@ -222,14 +226,14 @@ where
             Status::internal(format!("{:?}", e))
         }
 
-        let completed_on_time: bool = self.cop_handler
+        let time_out: bool = self.cop_handler
             .lock()
             .await
             .handle(Arc::new(cop_command))
             .await
-            .map_err(internal_error)?.into();
+            .map_err(internal_error)?.is_timeout();
 
-        if !completed_on_time {
+        if time_out {
             return Err(Status::deadline_exceeded("command was not completed on time"));
         }
 

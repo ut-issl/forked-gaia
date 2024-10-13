@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use tracing::error;
 
 use crate::proto::tmtc_generic_c2a::{TelemetryChannelSchema, TelemetryChannelSchemaMetadata, TelemetryComponentSchema, TelemetryComponentSchemaMetadata, TelemetrySchema, TelemetrySchemaMetadata};
-use crate::satellite::{self, create_clcw_channel, create_cop_command_channel, create_fop_channel, CLCWReceiver, CommandContext, CopCommandReceiver, CopCommandSender, FopCommandId, TelemetryReporter, TmivBuilder};
+use crate::satellite::{self, create_clcw_channel, create_cop_command_channel, create_fop_channel, CLCWReceiver, CommandContext, CopCommandReceiver, CopCommandSender, FopCommandId, TelemetryReporter, TimeOutResponse, TmivBuilder};
 use crate::tco_tmiv_util::{field_optenum, field_optint, field_schema_enum, field_schema_int};
 use crate::{satellite::FopReceiver, tco_tmiv_util::{field_enum, field_int}};
 
@@ -425,7 +425,7 @@ pub struct Service {
 }
 
 impl Service {
-    async fn try_handle_command(&mut self, command: CopCommand) -> Result<bool> {
+    async fn try_handle_command(&mut self, command: CopCommand) -> Result<TimeOutResponse> {
         if command.command.is_none() {
             return Err(anyhow!("command is required"));
         }
@@ -436,7 +436,7 @@ impl Service {
 
 #[async_trait]
 impl Handle<Arc<CopCommand>> for Service {
-    type Response = bool;
+    type Response = TimeOutResponse;
 
     async fn handle(&mut self, command: Arc<CopCommand>) -> Result<Self::Response> {
         self.try_handle_command(command.as_ref().clone()).await
@@ -726,7 +726,7 @@ where
                         }}).await;
                         match res {
                             Ok(ret) => {
-                                if let Err(_) = tx.send(ret.map(|_| true)) {
+                                if let Err(_) = tx.send(ret.map(|_| TimeOutResponse { is_timeout: false })) {
                                     error!("response receiver has gone");
                                 }
                             }
@@ -736,7 +736,7 @@ where
                                     let mut variables = variables.write().await;
                                     variables.set_state(State::TimeOut);
                                 }
-                                if let Err(_) = tx.send(Ok(false)) {
+                                if let Err(_) = tx.send(Ok(TimeOutResponse { is_timeout: true })) {
                                     error!("response receiver has gone");
                                 }
                             }
@@ -746,7 +746,7 @@ where
                         {
                             let mut variables = variables.write().await;
                             if variables.state != State::LockOut {
-                                if let Err(_) = tx.send(Ok(true)) {
+                                if let Err(_) = tx.send(Ok(TimeOutResponse { is_timeout: false })) {
                                     error!("response receiver has gone");
                                 }
                                 continue;
@@ -771,7 +771,7 @@ where
                         }}).await;
                         match res {
                             Ok(ret) => {
-                                if let Err(_) = tx.send(ret.map(|_| true)) {
+                                if let Err(_) = tx.send(ret.map(|_| TimeOutResponse { is_timeout: false })) {
                                     error!("response receiver has gone");
                                 }
                             }
@@ -781,7 +781,7 @@ where
                                     let mut variables = variables.write().await;
                                     variables.set_state(State::TimeOut);
                                 }
-                                if let Err(_) = tx.send(Ok(false)) {
+                                if let Err(_) = tx.send(Ok(TimeOutResponse { is_timeout: true })) {
                                     error!("response receiver has gone");
                                 }
                             }
@@ -796,7 +796,7 @@ where
                             let mut queue = queue.write().await;
                             queue.clear(CopQueueStatusPattern::Canceled);
                         }
-                        if let Err(_) = tx.send(Ok(true)) {
+                        if let Err(_) = tx.send(Ok(TimeOutResponse { is_timeout: false })) {
                             error!("response receiver has gone");
                         }
                     },
@@ -805,7 +805,7 @@ where
                             let mut timeout_sec = timeout_sec.lock().await;
                             *timeout_sec = tokio::time::Duration::from_secs(inner.timeout_sec as u64);
                         }
-                        if let Err(_) = tx.send(Ok(true)) {
+                        if let Err(_) = tx.send(Ok(TimeOutResponse { is_timeout: false })) {
                             error!("response receiver has gone");
                         }
                     },
