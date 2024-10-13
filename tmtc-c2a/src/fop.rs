@@ -17,7 +17,7 @@ use tracing::error;
 
 use crate::proto::tmtc_generic_c2a::{TelemetryChannelSchema, TelemetryChannelSchemaMetadata, TelemetryComponentSchema, TelemetryComponentSchemaMetadata, TelemetrySchema, TelemetrySchemaMetadata};
 use crate::satellite::{self, create_clcw_channel, create_cop_command_channel, create_cop_task_channel, CLCWReceiver, CommandContext, CopCommandReceiver, CopCommandSender, CopTaskId, TelemetryReporter, TimeOutResponse, TmivBuilder};
-use crate::tco_tmiv_util::field_schema_int;
+use crate::tco_tmiv_util::{field_schema_bytes, ByteSize};
 use crate::{satellite::CopTaskReceiver, tco_tmiv_util::field_int};
 
 use crate::registry::{CommandRegistry, TelemetryRegistry};
@@ -848,53 +848,65 @@ pub fn build_telemetry_component_schema_map() -> HashMap<String, TelemetryCompon
                                 is_restricted: false,
                             }),
                             fields: vec![
-                                field_schema_int(
+                                field_schema_bytes(
                                     "CONTROL_WORD_TYPE",
                                     "制御ワードタイプ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "VERSION_NUMBER",
                                     "バージョン番号",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "STATUS_FIELD",
                                     "ステータスフィールド",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "COP_IN_EFFECT",
                                     "COP有効フラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "VCID",
                                     "VCID",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "NO_RF_AVAILABLE",
                                     "RF利用不可フラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "NO_BIT_LOCK",
                                     "ビットロック不可フラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "LOCKOUT",
                                     "ロックアウトフラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "WAIT",
                                     "ウェイトフラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "RETRANSMIT",
                                     "再送信フラグ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "FARM_B_COUNTER",
                                     "FARM-Bカウンタ",
+                                    ByteSize::Uint8,
                                 ),
-                                field_schema_int(
+                                field_schema_bytes(
                                     "REPORT_VALUE",
                                     "VR値",
+                                    ByteSize::Uint8,
                                 ),
                             ],
                         }
