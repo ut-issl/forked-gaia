@@ -197,6 +197,7 @@ async fn main() -> Result<()> {
         let reflection_service = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(broker::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(proto::tmtc_generic_c2a::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(cop::FILE_DESCRIPTOR_SET)
             .build()
             .unwrap();
 
@@ -206,6 +207,7 @@ async fn main() -> Result<()> {
         let rpc_service = Server::builder()
             .layer(layer)
             .add_service(broker_server)
+            .add_service(cop_server)
             .add_service(tmtc_generic_c2a_server)
             .add_service(health_service)
             .add_service(reflection_service)
