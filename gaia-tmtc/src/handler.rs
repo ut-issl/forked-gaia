@@ -63,6 +63,10 @@ pub trait Hook<Input> {
     async fn hook(&mut self, input: Input) -> Result<Self::Output>;
 }
 
+trait Accepted {
+    fn accepted(&self) -> bool;
+}
+
 #[derive(Clone, Debug)]
 pub struct Choice<X, Y> {
     first: X,
@@ -73,16 +77,19 @@ pub struct Choice<X, Y> {
 impl<Q, S, X, Y> Handle<Q> for Choice<X, Y>
 where
     Q: Clone + Send + Sync + 'static,
-    X: Handle<Q, Response = Option<S>> + Send,
-    Y: Handle<Q, Response = Option<S>> + Send,
+    X: Handle<Q, Response = S> + Send,
+    Y: Handle<Q, Response = S> + Send,
+    S: Send + Accepted,
 {
-    type Response = Option<S>;
+    type Response = S;
 
     async fn handle(&mut self, request: Q) -> Result<Self::Response> {
-        if let Some(ret) = self.first.handle(request.clone()).await? {
-            return Ok(Some(ret));
+        let ret = self.first.handle(request.clone()).await?;
+        if ret.accepted() {
+            return Ok(ret);
+        } else {
+            return self.second.handle(request).await;
         }
-        self.second.handle(request).await
     }
 }
 
