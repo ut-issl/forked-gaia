@@ -1,9 +1,9 @@
 pub mod broker;
 pub mod command;
+pub mod cop;
 pub mod handler;
 pub mod recorder;
 pub mod telemetry;
-pub mod cop;
 
 pub use handler::{BeforeHook, BeforeHookLayer, Handle, Hook, Layer};
 pub mod tco_tmiv;

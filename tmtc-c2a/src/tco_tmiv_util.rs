@@ -2,7 +2,11 @@ use std::{collections::HashMap, fmt::Display};
 
 use gaia_tmtc::tco_tmiv::{tmiv_field, TmivField};
 
-use crate::proto::tmtc_generic_c2a::{telemetry_field_schema_metadata::{self, ConvType}, ConversionHex, ConversionStatus, TelemetryFieldDataType, TelemetryFieldSchema, TelemetryFieldSchemaMetadata};
+use crate::proto::tmtc_generic_c2a::{
+    telemetry_field_schema_metadata::{self, ConvType},
+    ConversionHex, ConversionStatus, TelemetryFieldDataType, TelemetryFieldSchema,
+    TelemetryFieldSchemaMetadata,
+};
 
 pub enum ByteSize {
     Uint8,
@@ -11,7 +15,11 @@ pub enum ByteSize {
     Uint64,
 }
 
-pub fn field_schema_bytes(name: &str, desctiprion: &str, byte_size: ByteSize) -> TelemetryFieldSchema {
+pub fn field_schema_bytes(
+    name: &str,
+    desctiprion: &str,
+    byte_size: ByteSize,
+) -> TelemetryFieldSchema {
     let data_type = match byte_size {
         ByteSize::Uint8 => TelemetryFieldDataType::TlmFieldUint8.into(),
         ByteSize::Uint16 => TelemetryFieldDataType::TlmFieldUint16.into(),
@@ -28,7 +36,11 @@ pub fn field_schema_bytes(name: &str, desctiprion: &str, byte_size: ByteSize) ->
     }
 }
 
-pub fn field_schema_number(name: &str, desctiprion: &str, data_type: TelemetryFieldDataType) -> TelemetryFieldSchema {
+pub fn field_schema_number(
+    name: &str,
+    desctiprion: &str,
+    data_type: TelemetryFieldDataType,
+) -> TelemetryFieldSchema {
     TelemetryFieldSchema {
         metadata: Some(TelemetryFieldSchemaMetadata {
             description: desctiprion.to_string(),
@@ -39,14 +51,19 @@ pub fn field_schema_number(name: &str, desctiprion: &str, data_type: TelemetryFi
     }
 }
 
-pub fn field_schema_enum(name: &str, desctiprion: &str, variants: HashMap<String, i64>, default: Option<String>) -> TelemetryFieldSchema {
+pub fn field_schema_enum(
+    name: &str,
+    desctiprion: &str,
+    variants: HashMap<String, i64>,
+    default: Option<String>,
+) -> TelemetryFieldSchema {
     TelemetryFieldSchema {
         metadata: Some(TelemetryFieldSchemaMetadata {
             description: desctiprion.to_string(),
             data_type: TelemetryFieldDataType::TlmFieldInt32 as i32,
-            conv_type: Some(telemetry_field_schema_metadata::ConvType::Status(ConversionStatus { 
-                variants, default 
-            })),
+            conv_type: Some(telemetry_field_schema_metadata::ConvType::Status(
+                ConversionStatus { variants, default },
+            )),
         }),
         name: name.to_string(),
     }

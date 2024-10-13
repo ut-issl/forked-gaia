@@ -29,7 +29,7 @@ use tower_http::trace::TraceLayer;
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-use tmtc_c2a::{kble_gs, proto, registry, fop, Satconfig};
+use tmtc_c2a::{fop, kble_gs, proto, registry, Satconfig};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -169,8 +169,7 @@ async fn main() -> Result<()> {
 
     // Constructing gRPC services
     let server_task = {
-        let broker_service = BrokerService::new(cmd_handler, tlm_bus, last_tmiv_store, 
-        );
+        let broker_service = BrokerService::new(cmd_handler, tlm_bus, last_tmiv_store);
         let broker_server = BrokerServer::new(broker_service);
         let cop_service = CopService::new(cop_handler, cop_bus, cop_status_store);
         let cop_server = CopServer::new(cop_service);

@@ -83,8 +83,8 @@ pub enum ConversionType {
         coefficients: Vec<f64>,
     },
     Status {
-        variants: HashMap<i64,String>,
-        default: Option<String>
+        variants: HashMap<i64, String>,
+        default: Option<String>,
     },
 }
 
@@ -129,28 +129,60 @@ impl Registry {
                         metadata: Some(proto::TelemetryFieldSchemaMetadata {
                             description: m.description.clone(),
                             data_type: match m.data_type {
-                                DataType::Int8 => proto::TelemetryFieldDataType::TlmFieldInt8 as i32,
-                                DataType::Int16 => proto::TelemetryFieldDataType::TlmFieldInt16 as i32,
-                                DataType::Int32 => proto::TelemetryFieldDataType::TlmFieldInt32 as i32,
-                                DataType::Int64 => proto::TelemetryFieldDataType::TlmFieldInt64 as i32,
-                                DataType::Uint8 => proto::TelemetryFieldDataType::TlmFieldUint8 as i32,
-                                DataType::Uint16 => proto::TelemetryFieldDataType::TlmFieldUint16 as i32,
-                                DataType::Uint32 => proto::TelemetryFieldDataType::TlmFieldUint32 as i32,
-                                DataType::Uint64 => proto::TelemetryFieldDataType::TlmFieldUint64 as i32,
-                                DataType::Float => proto::TelemetryFieldDataType::TlmFieldFloat as i32,
-                                DataType::Double => proto::TelemetryFieldDataType::TlmFieldDouble as i32,
+                                DataType::Int8 => {
+                                    proto::TelemetryFieldDataType::TlmFieldInt8 as i32
+                                }
+                                DataType::Int16 => {
+                                    proto::TelemetryFieldDataType::TlmFieldInt16 as i32
+                                }
+                                DataType::Int32 => {
+                                    proto::TelemetryFieldDataType::TlmFieldInt32 as i32
+                                }
+                                DataType::Int64 => {
+                                    proto::TelemetryFieldDataType::TlmFieldInt64 as i32
+                                }
+                                DataType::Uint8 => {
+                                    proto::TelemetryFieldDataType::TlmFieldUint8 as i32
+                                }
+                                DataType::Uint16 => {
+                                    proto::TelemetryFieldDataType::TlmFieldUint16 as i32
+                                }
+                                DataType::Uint32 => {
+                                    proto::TelemetryFieldDataType::TlmFieldUint32 as i32
+                                }
+                                DataType::Uint64 => {
+                                    proto::TelemetryFieldDataType::TlmFieldUint64 as i32
+                                }
+                                DataType::Float => {
+                                    proto::TelemetryFieldDataType::TlmFieldFloat as i32
+                                }
+                                DataType::Double => {
+                                    proto::TelemetryFieldDataType::TlmFieldDouble as i32
+                                }
                             },
                             conv_type: match &m.conv_type {
                                 ConversionType::None => None,
-                                ConversionType::Hex => Some(proto::telemetry_field_schema_metadata::ConvType::Hex(ConversionHex {})),
+                                ConversionType::Hex => {
+                                    Some(proto::telemetry_field_schema_metadata::ConvType::Hex(
+                                        ConversionHex {},
+                                    ))
+                                }
                                 ConversionType::Polynomial { coefficients } => Some(
-                                    proto::telemetry_field_schema_metadata::ConvType::Polynomial(proto::ConversionPolynomial { coefficients: coefficients.clone() })
+                                    proto::telemetry_field_schema_metadata::ConvType::Polynomial(
+                                        proto::ConversionPolynomial {
+                                            coefficients: coefficients.clone(),
+                                        },
+                                    ),
                                 ),
                                 ConversionType::Status { variants, default } => {
-                                    let variants = variants.iter().map(|(k, v)| (v.clone(), *k)).collect();
+                                    let variants =
+                                        variants.iter().map(|(k, v)| (v.clone(), *k)).collect();
                                     Some(proto::telemetry_field_schema_metadata::ConvType::Status(
-                                        proto::ConversionStatus { variants, default: default.clone() })
-                                    )
+                                        proto::ConversionStatus {
+                                            variants,
+                                            default: default.clone(),
+                                        },
+                                    ))
                                 }
                             },
                         }),
@@ -279,15 +311,22 @@ fn build_telemetry_schema<'a>(
                 },
                 match &schema.converter {
                     None => ConversionType::None,
-                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Hex) => ConversionType::Hex,
+                    Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Hex) => {
+                        ConversionType::Hex
+                    }
                     Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Polynomial(poly)) => {
-                        ConversionType::Polynomial { coefficients: poly.to_vec() }
+                        ConversionType::Polynomial {
+                            coefficients: poly.to_vec(),
+                        }
                     }
                     Some(gaia_ccsds_c2a::access::tlm::converter::Integral::Status(status)) => {
                         let (variants, default) = status.to_map_and_default();
-                        ConversionType::Status { variants, default: Some(default) }
+                        ConversionType::Status {
+                            variants,
+                            default: Some(default),
+                        }
                     }
-                }
+                },
             ),
             FieldValueSchema::Floating(schema) => (
                 match schema.field {
@@ -296,16 +335,18 @@ fn build_telemetry_schema<'a>(
                 },
                 match &schema.converter {
                     None => ConversionType::None,
-                    Some(poly) => ConversionType::Polynomial { coefficients: poly.to_vec() },
+                    Some(poly) => ConversionType::Polynomial {
+                        coefficients: poly.to_vec(),
+                    },
                 },
-            )
+            ),
         };
         let name_pair = build_field_metadata(
             order,
             field_name,
             &field_schema.metadata.description,
             data_type,
-            conv_type
+            conv_type,
         );
         match field_schema.value {
             FieldValueSchema::Integral(field_schema) => {
@@ -333,6 +374,6 @@ fn build_field_metadata(
         raw_name: format!("{tlmdb_name}@RAW"),
         description: description.to_string(),
         data_type,
-        conv_type
+        conv_type,
     }
 }

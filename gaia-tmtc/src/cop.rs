@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, VecDeque}, fmt::Debug, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Debug,
+    sync::Arc,
+};
 
 use anyhow::{anyhow, Result};
 use cop_server::Cop;
@@ -58,11 +62,8 @@ impl CopStatusStore {
 
     pub async fn get(&self, id: &Option<u32>) -> Option<CopTaskStatus> {
         match id {
-            Some(id) => 
-                self.status.read().await.get(id).cloned(),
-            None => {
-                None
-            }
+            Some(id) => self.status.read().await.get(id).cloned(),
+            None => None,
         }
     }
 
@@ -80,7 +81,7 @@ impl CopStatusStore {
     pub async fn set(&self, status: Arc<CopStatus>) -> Result<()> {
         let Some(inner) = status.as_ref().clone().inner else {
             return Err(anyhow!("inner status is required"));
-        }; 
+        };
         match inner {
             cop_status::Inner::TaskStatus(status) => {
                 let id = status.task_id;
@@ -103,15 +104,23 @@ impl CopStatusStore {
                             completed.push_back(status.task_id);
                         }
                     }
-                    _ => ()
+                    _ => (),
                 }
                 self.status.write().await.insert(id, status.clone());
             }
             cop_status::Inner::WorkerState(state) => {
-                self.worker.write().await.worker_state.clone_from(&Some(state));
+                self.worker
+                    .write()
+                    .await
+                    .worker_state
+                    .clone_from(&Some(state));
             }
             cop_status::Inner::TaskQueueStatus(status_set) => {
-                self.worker.write().await.task_queue_status.clone_from(&Some(status_set));
+                self.worker
+                    .write()
+                    .await
+                    .task_queue_status
+                    .clone_from(&Some(status_set));
             }
         }
         Ok(())
@@ -133,8 +142,8 @@ impl StoreCopStatusHook {
 impl Hook<Arc<CopStatus>> for StoreCopStatusHook {
     type Output = Arc<CopStatus>;
 
-    async fn hook(&mut self, cop_status: Arc<CopStatus>) -> Result<Self::Output> {    
-        self.store.set(cop_status.clone()).await?;    
+    async fn hook(&mut self, cop_status: Arc<CopStatus>) -> Result<Self::Output> {
+        self.store.set(cop_status.clone()).await?;
         Ok(cop_status)
     }
 }
@@ -160,13 +169,13 @@ pub trait IsTimeout {
 }
 
 #[tonic::async_trait]
-impl<C> Cop for CopService<C> 
+impl<C> Cop for CopService<C>
 where
     C: super::Handle<Arc<CopCommand>> + Send + Sync + 'static,
     C::Response: Send + IsTimeout + 'static,
 {
     type OpenStatusStreamStream = stream::BoxStream<'static, Result<StatusStreamResponse, Status>>;
-    
+
     #[tracing::instrument(skip(self))]
     async fn open_status_stream(
         &self,
@@ -187,10 +196,7 @@ where
         request: Request<GetTaskStatusRequest>,
     ) -> Result<Response<GetTaskStatusResponse>, Status> {
         let message = request.get_ref();
-        let status = self
-            .cop_status_store
-            .get(&message.task_id)
-            .await;
+        let status = self.cop_status_store.get(&message.task_id).await;
         Ok(Response::new(GetTaskStatusResponse {
             task_status: status,
         }))
@@ -201,7 +207,9 @@ where
         _request: Request<GetWorkerStatusRequest>,
     ) -> Result<Response<GetWorkerStatusResponse>, Status> {
         let worker_status = self.cop_status_store.get_worker().await;
-        Ok(Response::new(GetWorkerStatusResponse { worker_status: Some(worker_status) }))
+        Ok(Response::new(GetWorkerStatusResponse {
+            worker_status: Some(worker_status),
+        }))
     }
 
     #[tracing::instrument(skip(self))]
@@ -228,18 +236,21 @@ where
             Status::internal(format!("{:?}", e))
         }
 
-        let time_out: bool = self.cop_handler
+        let time_out: bool = self
+            .cop_handler
             .lock()
             .await
             .handle(Arc::new(cop_command))
             .await
-            .map_err(internal_error)?.is_timeout();
+            .map_err(internal_error)?
+            .is_timeout();
 
         if time_out {
-            return Err(Status::deadline_exceeded("command was not completed on time"));
+            return Err(Status::deadline_exceeded(
+                "command was not completed on time",
+            ));
         }
 
         Ok(Response::new(PostCommandResponse {}))
     }
-
 }

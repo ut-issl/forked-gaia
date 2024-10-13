@@ -14,5 +14,4 @@ fn main() {
         .file_descriptor_set_path(out_dir.join("cop_descriptor.bin"))
         .compile(&["proto/cop.proto"], &["proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
-
 }

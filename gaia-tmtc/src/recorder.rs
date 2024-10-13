@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use gaia_stub::{
-    cop::{CopCommand, CopStatus}, recorder::recorder_client::RecorderClient, tco_tmiv::{Tco, Tmiv}
+    cop::{CopCommand, CopStatus},
+    recorder::recorder_client::RecorderClient,
+    tco_tmiv::{Tco, Tmiv},
 };
 use prost_types::Timestamp;
 use tonic::transport::Channel;

@@ -57,14 +57,17 @@ where
             Status::internal(format!("{:?}", e))
         }
 
-        let response = self.cmd_handler
+        let response = self
+            .cmd_handler
             .lock()
             .await
             .handle(Arc::new(tco))
             .await
             .map_err(internal_error)?;
 
-        Ok(Response::new(PostCommandResponse { task_id: response.into() }))
+        Ok(Response::new(PostCommandResponse {
+            task_id: response.into(),
+        }))
     }
 
     #[tracing::instrument(skip(self))]

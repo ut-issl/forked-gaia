@@ -1,5 +1,8 @@
 pub mod tmtc_generic_c2a {
-    use crate::{fop, registry::{CommandRegistry, TelemetryRegistry}};
+    use crate::{
+        fop,
+        registry::{CommandRegistry, TelemetryRegistry},
+    };
 
     tonic::include_proto!("tmtc_generic_c2a");
 
@@ -14,8 +17,22 @@ pub mod tmtc_generic_c2a {
             tlm_registry: &TelemetryRegistry,
             cmd_registry: &CommandRegistry,
         ) -> anyhow::Result<Self> {
-            let telemetry_channels = fop::build_telemetry_channel_schema_map().into_iter().chain( tlm_registry.build_telemetry_channel_schema_map().into_iter()).collect();
-            let telemetry_components = fop::build_telemetry_component_schema_map().into_iter().chain(tlm_registry.build_telemetry_component_schema_map().into_iter()).collect();
+            let telemetry_channels = fop::build_telemetry_channel_schema_map()
+                .into_iter()
+                .chain(
+                    tlm_registry
+                        .build_telemetry_channel_schema_map()
+                        .into_iter(),
+                )
+                .collect();
+            let telemetry_components = fop::build_telemetry_component_schema_map()
+                .into_iter()
+                .chain(
+                    tlm_registry
+                        .build_telemetry_component_schema_map()
+                        .into_iter(),
+                )
+                .collect();
             let command_prefixes = cmd_registry.build_command_prefix_schema_map();
             let command_components = cmd_registry.build_command_component_schema_map();
             let satellite_schema = SatelliteSchema {

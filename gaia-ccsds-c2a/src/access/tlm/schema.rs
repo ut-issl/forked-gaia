@@ -220,9 +220,9 @@ fn as_polynomial(converter: Option<converter::Integral>) -> Result<Option<conver
             "invalid converter for floating-point number: {:?}",
             s
         )),
-        Some(converter::Integral::Hex) => Err(anyhow!(
-            "invalid converter for floating-point number: Hex",
-        )),
+        Some(converter::Integral::Hex) => {
+            Err(anyhow!("invalid converter for floating-point number: Hex",))
+        }
         None => Ok(None),
     }
 }

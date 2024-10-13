@@ -1,12 +1,17 @@
 use std::{sync::Arc, time};
 
 use crate::{
-    registry::{CommandRegistry, FatCommandSchema, TelemetryRegistry}, tco::{self, ParameterListWriter}, tmiv
+    registry::{CommandRegistry, FatCommandSchema, TelemetryRegistry},
+    tco::{self, ParameterListWriter},
+    tmiv,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use gaia_ccsds_c2a::{
-    ccsds::{self, aos, tc::{self, clcw::CLCW}},
+    ccsds::{
+        self, aos,
+        tc::{self, clcw::CLCW},
+    },
     ccsds_c2a::{
         self,
         aos::{virtual_channel::Demuxer, SpacePacket},
@@ -14,7 +19,9 @@ use gaia_ccsds_c2a::{
     },
 };
 use gaia_tmtc::{
-    cop::{CopCommand, IsTimeout}, tco_tmiv::{Tco, Tmiv}, Handle
+    cop::{CopCommand, IsTimeout},
+    tco_tmiv::{Tco, Tmiv},
+    Handle,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -104,7 +111,11 @@ impl CommandContext {
         Ok(segment_len)
     }
 
-    pub async fn transmit_to<T>(&self, sync_and_channel_coding: &mut T, vs: Option<u8>) -> Result<()>
+    pub async fn transmit_to<T>(
+        &self,
+        sync_and_channel_coding: &mut T,
+        vs: Option<u8>,
+    ) -> Result<()>
     where
         T: tc::SyncAndChannelCoding,
     {
@@ -115,7 +126,7 @@ impl CommandContext {
             (false, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
             (true, None) => {
                 return Err(anyhow!("VS is required for Type-AD"));
-            },
+            }
             (false, Some(_)) => {
                 warn!("VS is not allowed for Type-BD. Ignoring VS.");
                 (tc::sync_and_channel_coding::FrameType::TypeBD, 0)
@@ -141,7 +152,7 @@ pub fn create_cop_task_channel() -> (CopTaskSender, CopTaskReceiver) {
 
 #[derive(Clone)]
 pub struct CopTaskSender {
-    tx: mpsc::Sender<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    tx: mpsc::Sender<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)>,
 }
 
 impl CopTaskSender {
@@ -153,11 +164,13 @@ impl CopTaskSender {
 }
 
 pub struct CopTaskReceiver {
-    rx: mpsc::Receiver<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    rx: mpsc::Receiver<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)>,
 }
 
 impl CopTaskReceiver {
-    pub async fn recv(&mut self) -> Option<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)> {
+    pub async fn recv(
+        &mut self,
+    ) -> Option<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)> {
         self.rx.recv().await
     }
 }
@@ -250,7 +263,7 @@ impl Service {
 
     async fn try_handle_command(&mut self, tco: Arc<Tco>) -> Result<Option<CopTaskId>> {
         let Some(fat_schema) = self.registry.lookup(&tco.name) else {
-            return Err(anyhow!("unknown command: {}" ,tco.name));
+            return Err(anyhow!("unknown command: {}", tco.name));
         };
         let ctx = CommandContext {
             tc_scid: self.tc_scid,
