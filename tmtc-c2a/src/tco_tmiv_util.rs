@@ -111,7 +111,7 @@ pub fn field_optenum<S: Display>(name: &str, s: Option<S>) -> TmivField {
     }
 }
 
-struct OptBool(Option<bool>);
+pub struct OptBool(Option<bool>);
 impl Display for OptBool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
@@ -122,7 +122,7 @@ impl Display for OptBool {
     }
 }
 
-struct Bool(bool);
+pub struct Bool(bool);
 impl Display for Bool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
@@ -132,10 +132,10 @@ impl Display for Bool {
     }
 }
 
-fn field_bool(name: &str, v: bool) -> TmivField {
+pub fn field_bool(name: &str, v: bool) -> TmivField {
     field_enum(name, Bool(v))
 }
 
-fn field_optbool(name: &str, v: Option<bool>) -> TmivField {
+pub fn field_optbool(name: &str, v: Option<bool>) -> TmivField {
     field_enum(name, OptBool(v))
 }
