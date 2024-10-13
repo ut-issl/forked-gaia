@@ -110,3 +110,32 @@ pub fn field_optenum<S: Display>(name: &str, s: Option<S>) -> TmivField {
         value: s.map(|s| tmiv_field::Value::Enum(s.to_string())),
     }
 }
+
+struct OptBool(Option<bool>);
+impl Display for OptBool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(true) => write!(f, "TRUE"),
+            Some(false) => write!(f, "FALSE"),
+            None => write!(f, "UNKNOWN"),
+        }
+    }
+}
+
+struct Bool(bool);
+impl Display for Bool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            true => write!(f, "TRUE"),
+            false => write!(f, "FALSE"),
+        }
+    }
+}
+
+fn field_bool(name: &str, v: bool) -> TmivField {
+    field_enum(name, Bool(v))
+}
+
+fn field_optbool(name: &str, v: Option<bool>) -> TmivField {
+    field_enum(name, OptBool(v))
+}
