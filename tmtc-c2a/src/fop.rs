@@ -709,6 +709,11 @@ where
                                     error!("response receiver has gone");
                                 }
                                 continue;
+                            } else if variables.worker_state == WorkerStatePattern::WorkerClcwUnreceived {
+                                if tx.send(Err(anyhow!("CLCW is not received"))).is_err() {
+                                    error!("response receiver has gone");
+                                }
+                                continue;
                             }
                             variables.set_state(WorkerStatePattern::WorkerInitialize);
                         }
@@ -773,7 +778,12 @@ where
                     cop_command::Command::Unlock(_) => {
                         {
                             let mut variables = variables.write().await;
-                            if variables.worker_state != WorkerStatePattern::WorkerLockout {
+                            if variables.worker_state == WorkerStatePattern::WorkerClcwUnreceived {
+                                if tx.send(Err(anyhow!("CLCW is not received"))).is_err() {
+                                    error!("response receiver has gone");
+                                }
+                                continue;
+                            } else if variables.worker_state != WorkerStatePattern::WorkerLockout {
                                 if tx.send(Ok(TimeOutResponse { is_timeout: false })).is_err() {
                                     error!("response receiver has gone");
                                 }
