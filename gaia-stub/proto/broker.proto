@@ -20,7 +20,7 @@ message PostCommandRequest {
 }
 
 message PostCommandResponse {
-  google.protobuf.UInt32Value cop_id = 1;
+  google.protobuf.UInt32Value task_id = 1;
 }
 
 message CommandStreamRequest {

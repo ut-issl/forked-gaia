@@ -132,32 +132,32 @@ impl CommandContext {
     }
 }
 
-pub type FopCommandId = u32;
+pub type CopTaskId = u32;
 
-pub fn create_fop_channel() -> (FopSender, FopReceiver) {
+pub fn create_cop_task_channel() -> (CopTaskSender, CopTaskReceiver) {
     let (tx, rx) = mpsc::channel(256);
-    (FopSender { tx }, FopReceiver { rx })
+    (CopTaskSender { tx }, CopTaskReceiver { rx })
 }
 
 #[derive(Clone)]
-pub struct FopSender {
-    tx: mpsc::Sender<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)>,
+pub struct CopTaskSender {
+    tx: mpsc::Sender<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)>,
 }
 
-impl FopSender {
-    pub async fn send(&self, ctx: CommandContext) -> Result<Result<Option<FopCommandId>>> {
+impl CopTaskSender {
+    pub async fn send(&self, ctx: CommandContext) -> Result<Result<Option<CopTaskId>>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send((ctx, tx)).await?;
         Ok(rx.await?)
     }
 }
 
-pub struct FopReceiver {
-    rx: mpsc::Receiver<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)>,
+pub struct CopTaskReceiver {
+    rx: mpsc::Receiver<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)>,
 }
 
-impl FopReceiver {
-    pub async fn recv(&mut self) -> Option<(CommandContext,oneshot::Sender<Result<Option<FopCommandId>>>)> {
+impl CopTaskReceiver {
+    pub async fn recv(&mut self) -> Option<(CommandContext,oneshot::Sender<Result<Option<CopTaskId>>>)> {
         self.rx.recv().await
     }
 }
@@ -236,19 +236,19 @@ impl CopCommandReceiver {
 pub struct Service {
     registry: Arc<CommandRegistry>,
     tc_scid: u16,
-    cop_tx: FopSender,
+    task_tx: CopTaskSender,
 }
 
 impl Service {
-    pub fn new(registry: Arc<CommandRegistry>, tc_scid: u16, cop_tx: FopSender) -> Self {
+    pub fn new(registry: Arc<CommandRegistry>, tc_scid: u16, task_tx: CopTaskSender) -> Self {
         Self {
             registry,
             tc_scid,
-            cop_tx,
+            task_tx,
         }
     }
 
-    async fn try_handle_command(&mut self, tco: Arc<Tco>) -> Result<Option<FopCommandId>> {
+    async fn try_handle_command(&mut self, tco: Arc<Tco>) -> Result<Option<CopTaskId>> {
         let Some(fat_schema) = self.registry.lookup(&tco.name) else {
             return Err(anyhow!("unknown command: {}" ,tco.name));
         };
@@ -257,14 +257,14 @@ impl Service {
             fat_schema,
             tco,
         };
-        let response = self.cop_tx.send(ctx).await??;
+        let response = self.task_tx.send(ctx).await??;
         Ok(response)
     }
 }
 
 #[async_trait]
 impl Handle<Arc<Tco>> for Service {
-    type Response = Option<FopCommandId>;
+    type Response = Option<CopTaskId>;
 
     async fn handle(&mut self, tco: Arc<Tco>) -> Result<Self::Response> {
         Ok(self.try_handle_command(tco).await?)

@@ -8,7 +8,8 @@ import "tco_tmiv.proto";
 
 service Cop {
   rpc OpenStatusStream(StatusStreamRequest) returns (stream StatusStreamResponse);
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse);
   rpc GetAllStatus(GetAllStatusRequest) returns (GetAllStatusResponse);
   rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
 }
@@ -20,18 +21,26 @@ message StatusStreamResponse {
   CopStatus cop_status = 1;
 }
 
-message GetStatusRequest {
-  google.protobuf.UInt32Value cop_id = 1;
+message GetTaskStatusRequest {
+  google.protobuf.UInt32Value task_id = 1;
 }
 
-message GetStatusResponse {
-  CopStatus cop_status = 1;
+message GetTaskStatusResponse {
+  CopTaskStatus task_status = 1;
+}
+
+message GetWorkerStatusRequest {
+}
+
+message GetWorkerStatusResponse {
+  WorkerStatusSet worker_status = 1;
 }
 
 message CopStatus {
   oneof inner {
-    CopQueueStatus queue_status = 1;
-    CopWorkerStatus worker_status = 2;
+    CopTaskStatus task_status = 1;
+    WorkerState worker_state = 2;
+    TaskQueueStatusSet task_queue_status = 3;
   }
 }
 
@@ -39,8 +48,8 @@ message GetAllStatusRequest {
 }
 
 message GetAllStatusResponse {
-  repeated CopQueueStatus cop_statuses = 1;
-  CopWorkerStatus worker_status = 2;
+  repeated CopTaskStatus task_statuses = 1;
+  WorkerStatusSet worker_status = 2;
 }
 
 message PostCommandRequest {
@@ -50,14 +59,14 @@ message PostCommandRequest {
 message PostCommandResponse {
 }
 
-message CopQueueStatus {
-  uint32 cop_id = 1;
+message CopTaskStatus {
+  uint32 task_id = 1;
   tco_tmiv.Tco tco = 2;
-  CopQueueStatusPattern status = 3;
+  CopTaskStatusPattern status = 3;
   google.protobuf.Timestamp timestamp = 4;
 }
 
-enum CopQueueStatusPattern {
+enum CopTaskStatusPattern {
   PENDING = 0;
   EXECUTED = 1;
   ACCEPTED = 2;
@@ -68,20 +77,41 @@ enum CopQueueStatusPattern {
   FAILED = 7;
 }
 
-message CopWorkerStatus {
-  CopWorkerStatusPattern status = 1;
+message WorkerStatusSet {
+  WorkerState worker_state = 2;
+  TaskQueueStatusSet task_queue_status = 3;
+}
+
+message WorkerState {
+  WorkerStatePattern state = 1;
   google.protobuf.Timestamp timestamp = 2;
 }
 
-enum CopWorkerStatusPattern {
-  WORKER_IDLE = 0;
-  WORKER_INITIALIZE = 1;
-  WORKER_ACTIVE = 2;
-  WORKER_LOCKOUT = 3;
-  WORKER_UNLOCKING = 4;
-  WORKER_TIMEOUT = 5;
-  WORKER_FAILED = 6;
-  WORKER_CANCELED = 7;
+enum WorkerStatePattern {
+  WORKER_CLCW_UNRECEIVED = 0;
+  WORKER_IDLE = 1;
+  WORKER_INITIALIZE = 2;
+  WORKER_ACTIVE = 3;
+  WORKER_LOCKOUT = 4;
+  WORKER_UNLOCKING = 5;
+  WORKER_TIMEOUT = 6;
+  WORKER_FAILED = 7;
+  WORKER_CANCELED = 8;
+}
+
+message TaskQueueStatusSet {
+  TaskQueueStatus pending = 1;
+  TaskQueueStatus executed = 2;
+  TaskQueueStatus rejected = 3;
+  google.protobuf.UInt32Value front_vs = 4;
+  google.protobuf.Timestamp oldest_time = 5;
+  google.protobuf.Timestamp timestamp = 6;
+}
+
+message TaskQueueStatus {
+  google.protobuf.UInt32Value front_id = 1;
+  google.protobuf.StringValue front_tco_name = 2;
+  uint32 command_number = 3;
 }
 
 message CopCommand {

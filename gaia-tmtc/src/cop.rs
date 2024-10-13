@@ -40,9 +40,9 @@ impl Handle<Arc<CopStatus>> for Bus {
 }
 
 pub struct CopStatusStore {
-    status: RwLock<HashMap<u32, CopQueueStatus>>,
-    completed: RwLock<VecDeque<CopQueueStatus>>,
-    worker: RwLock<CopWorkerStatus>,
+    status: RwLock<HashMap<u32, CopTaskStatus>>,
+    completed: RwLock<VecDeque<u32>>,
+    worker: RwLock<WorkerStatusSet>,
     capacity: usize,
 }
 
@@ -51,31 +51,28 @@ impl CopStatusStore {
         Self {
             status: RwLock::new(HashMap::new()),
             completed: RwLock::new(VecDeque::with_capacity(capacity)),
-            worker: RwLock::new(CopWorkerStatus::default()),
+            worker: RwLock::new(WorkerStatusSet::default()),
             capacity,
         }
     }
 
-    pub async fn get(&self, id: &Option<u32>) -> Option<CopStatus> {
+    pub async fn get(&self, id: &Option<u32>) -> Option<CopTaskStatus> {
         match id {
             Some(id) => 
-                self.status.read().await.get(id).cloned().map(|status| {
-                    CopStatus {
-                        inner: Some(cop_status::Inner::QueueStatus(status)),
-                    }
-                }),
+                self.status.read().await.get(id).cloned(),
             None => {
-                let worker = self.worker.read().await.clone();
-                Some(CopStatus {
-                    inner: Some(cop_status::Inner::WorkerStatus(worker)),
-                })
+                None
             }
         }
     }
 
+    pub async fn get_worker(&self) -> WorkerStatusSet {
+        self.worker.read().await.clone()
+    }
+
     pub async fn get_all(&self) -> GetAllStatusResponse {
         GetAllStatusResponse {
-            cop_statuses: self.status.read().await.values().cloned().collect(),
+            task_statuses: self.status.read().await.values().cloned().collect(),
             worker_status: Some(self.worker.read().await.clone()),
         }
     }
@@ -85,11 +82,11 @@ impl CopStatusStore {
             return Err(anyhow!("inner status is required"));
         }; 
         match inner {
-            cop_status::Inner::QueueStatus(status) => {
-                let id = status.cop_id.clone();
+            cop_status::Inner::TaskStatus(status) => {
+                let id = status.task_id;
                 let pattern = status.status();
                 match pattern {
-                    CopQueueStatusPattern::Accepted | CopQueueStatusPattern::Canceled => {
+                    CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled => {
                         let pop_item = {
                             let mut completed = self.completed.write().await;
                             if completed.len() == self.capacity {
@@ -99,19 +96,22 @@ impl CopStatusStore {
                             }
                         };
                         if let Some(item) = pop_item {
-                            self.status.write().await.remove(&item.cop_id);
+                            self.status.write().await.remove(&item);
                         }
                         {
                             let mut completed = self.completed.write().await;
-                            completed.push_back(status.clone());
+                            completed.push_back(status.task_id);
                         }
                     }
                     _ => ()
                 }
                 self.status.write().await.insert(id, status.clone());
             }
-            cop_status::Inner::WorkerStatus(status) => {
-                self.worker.write().await.clone_from(&status);
+            cop_status::Inner::WorkerState(state) => {
+                self.worker.write().await.worker_state.clone_from(&Some(state));
+            }
+            cop_status::Inner::TaskQueueStatus(status_set) => {
+                self.worker.write().await.task_queue_status.clone_from(&Some(status_set));
             }
         }
         Ok(())
@@ -182,24 +182,26 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_status(
+    async fn get_task_status(
         &self,
-        request: Request<GetStatusRequest>,
-    ) -> Result<Response<GetStatusResponse>, Status> {
+        request: Request<GetTaskStatusRequest>,
+    ) -> Result<Response<GetTaskStatusResponse>, Status> {
         let message = request.get_ref();
         let status = self
             .cop_status_store
-            .get(&message.cop_id)
+            .get(&message.task_id)
             .await;
-        if let Some(status) = status {
-            Ok(Response::new(GetStatusResponse {
-                cop_status: Some(status.clone()),
-            }))
-        } else {
-            Ok(Response::new(GetStatusResponse {
-                cop_status: None,
-            }))
-        }
+        Ok(Response::new(GetTaskStatusResponse {
+            task_status: status,
+        }))
+    }
+    #[tracing::instrument(skip(self))]
+    async fn get_worker_status(
+        &self,
+        _request: Request<GetWorkerStatusRequest>,
+    ) -> Result<Response<GetWorkerStatusResponse>, Status> {
+        let worker_status = self.cop_status_store.get_worker().await;
+        Ok(Response::new(GetWorkerStatusResponse { worker_status: Some(worker_status) }))
     }
 
     #[tracing::instrument(skip(self))]

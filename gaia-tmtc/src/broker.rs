@@ -64,7 +64,7 @@ where
             .await
             .map_err(internal_error)?;
 
-        Ok(Response::new(PostCommandResponse { cop_id: response.into() }))
+        Ok(Response::new(PostCommandResponse { task_id: response.into() }))
     }
 
     #[tracing::instrument(skip(self))]
