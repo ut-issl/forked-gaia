@@ -63,7 +63,7 @@ pub trait Hook<Input> {
     async fn hook(&mut self, input: Input) -> Result<Self::Output>;
 }
 
-trait Accepted {
+pub trait Accepted {
     fn accepted(&self) -> bool;
 }
 
