@@ -103,7 +103,7 @@ message TaskQueueStatusSet {
   TaskQueueStatus pending = 1;
   TaskQueueStatus executed = 2;
   TaskQueueStatus rejected = 3;
-  google.protobuf.UInt32Value front_vs = 4;
+  uint32 front_vs = 4;
   google.protobuf.Timestamp oldest_time = 5;
   google.protobuf.Timestamp timestamp = 6;
 }

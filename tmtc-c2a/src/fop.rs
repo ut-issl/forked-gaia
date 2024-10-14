@@ -299,7 +299,7 @@ impl FopQueue {
             .map(|(_, _, time)| *time)
             .or_else(|| self.rejected.front().map(|(_, _, time)| *time));
         let vs_list = vec![pending_vs, executed_vs, rejected_vs];
-        let front_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32);
+        let front_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
         let oldest_time = oldest_time.map(|time| time.into());
         let timestamp = Some(SystemTime::now().into());
         let status = TaskQueueStatusSet {
