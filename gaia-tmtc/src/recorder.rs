@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use cop_recorder_client::CopRecorderClient;
 use gaia_stub::{
     cop::{CopCommand, CopStatus},
-    recorder::recorder_client::RecorderClient,
+    recorder::tmtc_recorder_client::TmtcRecorderClient,
     tco_tmiv::{Tco, Tmiv},
 };
 use prost_types::Timestamp;
@@ -16,18 +17,18 @@ use super::Hook;
 pub use gaia_stub::recorder::*;
 
 #[derive(Clone)]
-pub struct RecordHook {
-    recorder_client: RecorderClient<Channel>,
+pub struct TmtcRecordHook {
+    recorder_client: TmtcRecorderClient<Channel>,
 }
 
-impl RecordHook {
-    pub fn new(recorder_client: RecorderClient<Channel>) -> Self {
+impl TmtcRecordHook {
+    pub fn new(recorder_client: TmtcRecorderClient<Channel>) -> Self {
         Self { recorder_client }
     }
 }
 
 #[async_trait]
-impl Hook<Arc<Tco>> for RecordHook {
+impl Hook<Arc<Tco>> for TmtcRecordHook {
     type Output = Arc<Tco>;
 
     async fn hook(&mut self, tco: Arc<Tco>) -> Result<Self::Output> {
@@ -47,7 +48,7 @@ impl Hook<Arc<Tco>> for RecordHook {
 }
 
 #[async_trait]
-impl Hook<Arc<Tmiv>> for RecordHook {
+impl Hook<Arc<Tmiv>> for TmtcRecordHook {
     type Output = Arc<Tmiv>;
 
     async fn hook(&mut self, tmiv: Arc<Tmiv>) -> Result<Self::Output> {
@@ -64,8 +65,20 @@ impl Hook<Arc<Tmiv>> for RecordHook {
     }
 }
 
+#[derive(Clone)]
+pub struct CopRecordHook {
+    recorder_client: CopRecorderClient<Channel>,
+}
+
+impl CopRecordHook {
+    pub fn new(recorder_client: CopRecorderClient<Channel>) -> Self {
+        Self { recorder_client }
+    }
+}
+
+
 #[async_trait]
-impl Hook<Arc<CopStatus>> for RecordHook {
+impl Hook<Arc<CopStatus>> for CopRecordHook {
     type Output = Arc<CopStatus>;
 
     async fn hook(&mut self, cop_status: Arc<CopStatus>) -> Result<Self::Output> {
@@ -83,7 +96,7 @@ impl Hook<Arc<CopStatus>> for RecordHook {
 }
 
 #[async_trait]
-impl Hook<Arc<CopCommand>> for RecordHook {
+impl Hook<Arc<CopCommand>> for CopRecordHook {
     type Output = Arc<CopCommand>;
 
     async fn hook(&mut self, cop_command: Arc<CopCommand>) -> Result<Self::Output> {

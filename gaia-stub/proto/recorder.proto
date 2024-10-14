@@ -6,9 +6,12 @@ import "tco_tmiv.proto";
 import "cop.proto";
 import "google/protobuf/timestamp.proto";
 
-service Recorder {
+service TmtcRecorder {
   rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
   rpc PostTelemetry(PostTelemetryRequest) returns (PostTelemetryResponse);
+}
+
+service CopRecorder {
   rpc PostCopStatus(PostCopStatusRequest) returns (PostCopStatusResponse);
   rpc PostCopCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }

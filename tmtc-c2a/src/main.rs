@@ -9,8 +9,9 @@ use clap::Parser;
 use gaia_tmtc::broker::broker_server::BrokerServer;
 use gaia_tmtc::cop::cop_server::CopServer;
 use gaia_tmtc::cop::{self, CopService};
-use gaia_tmtc::recorder::recorder_client::RecorderClient;
-use gaia_tmtc::recorder::RecordHook;
+use gaia_tmtc::recorder::cop_recorder_client::CopRecorderClient;
+use gaia_tmtc::recorder::tmtc_recorder_client::TmtcRecorderClient;
+use gaia_tmtc::recorder::{CopRecordHook, TmtcRecordHook};
 use gaia_tmtc::BeforeHookLayer;
 use gaia_tmtc::{
     broker::{self, BrokerService},
@@ -51,7 +52,9 @@ pub struct Args {
     #[clap(env, long)]
     satconfig: PathBuf,
     #[clap(env, long)]
-    recorder_endpoint: Option<Uri>,
+    tmtc_recorder_endpoint: Option<Uri>,
+    #[clap(env, long)]
+    cop_recorder_endpoint: Option<Uri>,
 }
 
 impl Args {
@@ -101,7 +104,7 @@ async fn main() -> Result<()> {
         satconfig.cmd_prefix_map,
     )?;
 
-    let recorder_client = if let Some(recorder_endpoint) = args.recorder_endpoint {
+    let tmtc_recorder_client = if let Some(recorder_endpoint) = args.tmtc_recorder_endpoint {
         let recorder_client_channel = loop {
             match Channel::builder(recorder_endpoint.clone()).connect().await {
                 Ok(channel) => break channel,
@@ -111,13 +114,32 @@ async fn main() -> Result<()> {
                 }
             }
         };
-        let recorder_client = RecorderClient::new(recorder_client_channel);
+        let recorder_client = TmtcRecorderClient::new(recorder_client_channel);
         Some(recorder_client)
     } else {
         None
     };
-    let recorder_layer = recorder_client
-        .map(RecordHook::new)
+    let tmtc_recorder_layer = tmtc_recorder_client
+        .map(TmtcRecordHook::new)
+        .map(BeforeHookLayer::new);
+
+    let cop_recorder_client = if let Some(recorder_endpoint) = args.cop_recorder_endpoint {
+        let recorder_client_channel = loop {
+            match Channel::builder(recorder_endpoint.clone()).connect().await {
+                Ok(channel) => break channel,
+                Err(e) => {
+                    tracing::warn!(message = "recorder not available", %e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        };
+        let recorder_client = CopRecorderClient::new(recorder_client_channel);
+        Some(recorder_client)
+    } else {
+        None
+    };
+    let cop_recorder_layer = cop_recorder_client
+        .map(CopRecordHook::new)
         .map(BeforeHookLayer::new);
 
     let tmtc_generic_c2a_service =
@@ -130,7 +152,7 @@ async fn main() -> Result<()> {
     let store_last_tmiv_hook = telemetry::StoreLastTmivHook::new(last_tmiv_store.clone());
     let tlm_handler = handler::Builder::new()
         .before_hook(store_last_tmiv_hook)
-        .option_layer(recorder_layer.clone())
+        .option_layer(tmtc_recorder_layer.clone())
         .build(tlm_bus.clone());
 
     let cop_bus = cop::Bus::new(20);
@@ -139,7 +161,7 @@ async fn main() -> Result<()> {
     let store_cop_status_hook = cop::StoreCopStatusHook::new(cop_status_store.clone());
     let cop_status_handler = handler::Builder::new()
         .before_hook(store_cop_status_hook)
-        .option_layer(recorder_layer.clone())
+        .option_layer(cop_recorder_layer.clone())
         .build(cop_bus.clone());
 
     let (link, socket) = kble_gs::new();
@@ -160,11 +182,11 @@ async fn main() -> Result<()> {
     let cop_command_task = fop_worker.run();
 
     let cmd_handler = handler::Builder::new()
-        .option_layer(recorder_layer.clone())
+        .option_layer(tmtc_recorder_layer.clone())
         .build(satellite_svc);
 
     let cop_handler = handler::Builder::new()
-        .option_layer(recorder_layer)
+        .option_layer(cop_recorder_layer)
         .build(cop_command_svc);
 
     // Constructing gRPC services
