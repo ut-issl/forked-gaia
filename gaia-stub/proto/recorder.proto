@@ -12,7 +12,9 @@ service TmtcRecorder {
 }
 
 service CopRecorder {
-  rpc PostCopStatus(PostCopStatusRequest) returns (PostCopStatusResponse);
+  rpc PostCopTaskStatus(PostCopTaskStatusRequest) returns (PostCopTaskStatusResponse);
+  rpc PostCopWorkerStatus(PostCopWorkerStatusRequest) returns (PostCopWorkerStatusResponse);
+  rpc PostCopQueueStatus(PostCopQueueStatusRequest) returns (PostCopQueueStatusResponse);
   rpc PostCopCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }
 
@@ -31,11 +33,25 @@ message PostTelemetryRequest {
 message PostTelemetryResponse {
 }
 
-message PostCopStatusRequest {
-  cop.CopStatus cop_status = 1;
+message PostCopTaskStatusRequest {
+  cop.CopTaskStatus cop_status = 1;
 }
 
-message PostCopStatusResponse {
+message PostCopTaskStatusResponse {
+}
+
+message PostCopWorkerStatusRequest {
+  cop.CopWorkerStatus worker_status = 1;
+}
+
+message PostCopWorkerStatusResponse {
+}
+
+message PostCopQueueStatusRequest {
+  cop.CopQueueStatusSet queue_status = 1;
+}
+
+message PostCopQueueStatusResponse {
 }
 
 message PostCopCommandRequest {

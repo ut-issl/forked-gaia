@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use cop_recorder_client::CopRecorderClient;
 use gaia_stub::{
-    cop::{CopCommand, CopStatus},
+    cop::{CopCommand, CopQueueStatusSet, CopTaskStatus, CopWorkerStatus},
     recorder::tmtc_recorder_client::TmtcRecorderClient,
     tco_tmiv::{Tco, Tmiv},
 };
@@ -78,13 +78,13 @@ impl CopRecordHook {
 
 
 #[async_trait]
-impl Hook<Arc<CopStatus>> for CopRecordHook {
-    type Output = Arc<CopStatus>;
+impl Hook<Arc<CopTaskStatus>> for CopRecordHook {
+    type Output = Arc<CopTaskStatus>;
 
-    async fn hook(&mut self, cop_status: Arc<CopStatus>) -> Result<Self::Output> {
+    async fn hook(&mut self, cop_status: Arc<CopTaskStatus>) -> Result<Self::Output> {
         let ret = self
             .recorder_client
-            .post_cop_status(PostCopStatusRequest {
+            .post_cop_task_status(PostCopTaskStatusRequest {
                 cop_status: Some(cop_status.as_ref().clone()),
             })
             .await;
@@ -92,6 +92,42 @@ impl Hook<Arc<CopStatus>> for CopRecordHook {
             error!("failed to record COP status: {}", e);
         }
         Ok(cop_status)
+    }
+}
+
+#[async_trait]
+impl Hook<Arc<CopWorkerStatus>> for CopRecordHook {
+    type Output = Arc<CopWorkerStatus>;
+
+    async fn hook(&mut self, worker_status: Arc<CopWorkerStatus>) -> Result<Self::Output> {
+        let ret = self
+            .recorder_client
+            .post_cop_worker_status(PostCopWorkerStatusRequest {
+                worker_status: Some(worker_status.as_ref().clone()),
+            })
+            .await;
+        if let Err(e) = ret {
+            error!("failed to record COP worker status: {}", e);
+        }
+        Ok(worker_status)
+    }
+}
+
+#[async_trait]
+impl Hook<Arc<CopQueueStatusSet>> for CopRecordHook {
+    type Output = Arc<CopQueueStatusSet>;
+
+    async fn hook(&mut self, queue_status: Arc<CopQueueStatusSet>) -> Result<Self::Output> {
+        let ret = self
+            .recorder_client
+            .post_cop_queue_status(PostCopQueueStatusRequest {
+                queue_status: Some(queue_status.as_ref().clone()),
+            })
+            .await;
+        if let Err(e) = ret {
+            error!("failed to record worker status: {}", e);
+        }
+        Ok(queue_status)
     }
 }
 

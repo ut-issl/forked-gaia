@@ -7,56 +7,63 @@ import "google/protobuf/wrappers.proto";
 import "tco_tmiv.proto";
 
 service Cop {
-  rpc OpenStatusStream(StatusStreamRequest) returns (stream StatusStreamResponse);
-  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
-  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse);
-  rpc GetAllStatus(GetAllStatusRequest) returns (GetAllStatusResponse);
-  rpc PostCommand(PostCommandRequest) returns (PostCommandResponse);
+  rpc OpenTaskStatusStream(CopTaskStatusStreamRequest) returns (stream CopTaskStatusStreamResponse);
+  rpc OpenWorkerStatusStream(CopWorkerStatusStreamRequest) returns (stream CopWorkerStatusStreamResponse);
+  rpc OpenQueueStatusStream(CopQueueStatusStreamRequest) returns (stream CopQueueStatusStreamResponse);
+  rpc GetTaskStatus(GetCopTaskStatusRequest) returns (GetCopTaskStatusResponse);
+  rpc GetWorkerStatus(GetCopWorkerStatusRequest) returns (GetCopWorkerStatusResponse);
+  rpc GetQueueStatus(GetCopQueueStatusRequest) returns (GetCopQueueStatusResponse);
+  rpc PostCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }
 
-message StatusStreamRequest {
+message CopTaskStatusStreamRequest {
 }
 
-message StatusStreamResponse {
-  CopStatus cop_status = 1;
-}
-
-message GetTaskStatusRequest {
-  google.protobuf.UInt32Value task_id = 1;
-}
-
-message GetTaskStatusResponse {
+message CopTaskStatusStreamResponse {
   CopTaskStatus task_status = 1;
 }
 
-message GetWorkerStatusRequest {
+message CopWorkerStatusStreamRequest {
 }
 
-message GetWorkerStatusResponse {
-  WorkerStatusSet worker_status = 1;
+message CopWorkerStatusStreamResponse {
+  CopWorkerStatus worker_status = 1;
 }
 
-message CopStatus {
-  oneof inner {
-    CopTaskStatus task_status = 1;
-    WorkerState worker_state = 2;
-    TaskQueueStatusSet task_queue_status = 3;
-  }
+message CopQueueStatusStreamRequest {
 }
 
-message GetAllStatusRequest {
+message CopQueueStatusStreamResponse {
+  CopQueueStatusSet queue_status = 1;
 }
 
-message GetAllStatusResponse {
-  repeated CopTaskStatus task_statuses = 1;
-  WorkerStatusSet worker_status = 2;
+message GetCopTaskStatusRequest {
+  uint32 task_id = 1;
 }
 
-message PostCommandRequest {
+message GetCopTaskStatusResponse {
+  CopTaskStatus task_status = 1;
+}
+
+message GetCopWorkerStatusRequest {
+}
+
+message GetCopWorkerStatusResponse {
+  CopWorkerStatus worker_status = 1;
+}
+
+message GetCopQueueStatusRequest {
+}
+
+message GetCopQueueStatusResponse {
+  CopQueueStatusSet queue_status = 1;
+}
+
+message PostCopCommandRequest {
   CopCommand command = 1;
 }
 
-message PostCommandResponse {
+message PostCopCommandResponse {
 }
 
 message CopTaskStatus {
@@ -77,17 +84,12 @@ enum CopTaskStatusPattern {
   FAILED = 7;
 }
 
-message WorkerStatusSet {
-  WorkerState worker_state = 2;
-  TaskQueueStatusSet task_queue_status = 3;
-}
-
-message WorkerState {
-  WorkerStatePattern state = 1;
+message CopWorkerStatus {
+  CopWorkerStatusPattern state = 1;
   google.protobuf.Timestamp timestamp = 2;
 }
 
-enum WorkerStatePattern {
+enum CopWorkerStatusPattern {
   WORKER_CLCW_UNRECEIVED = 0;
   WORKER_IDLE = 1;
   WORKER_INITIALIZE = 2;
@@ -99,41 +101,41 @@ enum WorkerStatePattern {
   WORKER_CANCELED = 8;
 }
 
-message TaskQueueStatusSet {
-  TaskQueueStatus pending = 1;
-  TaskQueueStatus executed = 2;
-  TaskQueueStatus rejected = 3;
-  uint32 front_vs = 4;
-  google.protobuf.Timestamp oldest_time = 5;
+message CopQueueStatusSet {
+  CopQueueStatus pending = 1;
+  CopQueueStatus executed = 2;
+  CopQueueStatus rejected = 3;
+  uint32 head_vs = 4;
+  google.protobuf.Timestamp oldest_arrival_time = 5;
   google.protobuf.Timestamp timestamp = 6;
 }
 
-message TaskQueueStatus {
-  google.protobuf.UInt32Value front_id = 1;
-  google.protobuf.StringValue front_tco_name = 2;
-  uint32 command_number = 3;
+message CopQueueStatus {
+  google.protobuf.UInt32Value head_id = 1;
+  google.protobuf.StringValue head_tco_name = 2;
+  uint32 task_count = 3;
 }
 
 message CopCommand {
   oneof command {
-    InitializeCommand initialize = 1;
-    TerminateCommand terminate = 2;
-    UnlockCommand unlock = 3;
-    SetTimeoutCommand set_timeout = 4;
+    CopInitializeCommand initialize = 1;
+    CopTerminateCommand terminate = 2;
+    CopUnlockCommand unlock = 3;
+    CopSetTimeoutCommand set_timeout = 4;
   }
 }
 
-message InitializeCommand {
+message CopInitializeCommand {
   uint32 vsvr = 1;
 }
 
-message TerminateCommand {
+message CopTerminateCommand {
 }
 
-message UnlockCommand {
+message CopUnlockCommand {
 }
 
-message SetTimeoutCommand {
+message CopSetTimeoutCommand {
   uint32 timeout_sec = 1;
 }
 

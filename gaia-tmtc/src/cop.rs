@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use cop_server::Cop;
 use futures::{stream, TryStreamExt};
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -16,116 +16,100 @@ use crate::{Handle, Hook};
 pub use gaia_stub::cop::*;
 
 #[derive(Clone)]
-pub struct Bus {
-    cop_status_tx: broadcast::Sender<Arc<CopStatus>>,
+pub struct Bus<T> {
+    cop_status_tx: broadcast::Sender<Arc<T>>,
 }
 
-impl Bus {
+impl<T> Bus<T> {
     pub fn new(capacity: usize) -> Self {
         let (cop_status_tx, _) = broadcast::channel(capacity);
         Self { cop_status_tx }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<CopStatus>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<T>> {
         self.cop_status_tx.subscribe()
     }
 }
 
 #[async_trait]
-impl Handle<Arc<CopStatus>> for Bus {
+impl<T: Send + Sync> Handle<Arc<T>> for Bus<T> {
     type Response = ();
 
-    async fn handle(&mut self, tmiv: Arc<CopStatus>) -> Result<Self::Response> {
+    async fn handle(&mut self, status: Arc<T>) -> Result<Self::Response> {
         // it's ok if there are no receivers
         // so just fire and forget
-        self.cop_status_tx.send(tmiv).ok();
+        self.cop_status_tx.send(status).ok();
         Ok(())
     }
 }
 
+
 pub struct CopStatusStore {
-    status: RwLock<HashMap<u32, CopTaskStatus>>,
+    task_status: RwLock<HashMap<u32, CopTaskStatus>>,
     completed: RwLock<VecDeque<u32>>,
-    worker: RwLock<WorkerStatusSet>,
+    worker_status: RwLock<CopWorkerStatus>,
+    queue_status: RwLock<CopQueueStatusSet>,
     capacity: usize,
 }
 
 impl CopStatusStore {
     pub fn new(capacity: usize) -> Self {
         Self {
-            status: RwLock::new(HashMap::new()),
+            task_status: RwLock::new(HashMap::new()),
             completed: RwLock::new(VecDeque::with_capacity(capacity)),
-            worker: RwLock::new(WorkerStatusSet::default()),
+            worker_status: RwLock::new(CopWorkerStatus::default()),
+            queue_status: RwLock::new(CopQueueStatusSet::default()),
             capacity,
         }
     }
 
-    pub async fn get(&self, id: &Option<u32>) -> Option<CopTaskStatus> {
-        match id {
-            Some(id) => self.status.read().await.get(id).cloned(),
-            None => None,
-        }
+    pub async fn get_task(&self, id: &u32) -> Option<CopTaskStatus> {
+        self.task_status.read().await.get(id).cloned()
     }
 
-    pub async fn get_worker(&self) -> WorkerStatusSet {
-        self.worker.read().await.clone()
+    pub async fn get_worker(&self) -> CopWorkerStatus {
+        self.worker_status.read().await.clone()
     }
 
-    pub async fn get_all(&self) -> GetAllStatusResponse {
-        GetAllStatusResponse {
-            task_statuses: self.status.read().await.values().cloned().collect(),
-            worker_status: Some(self.worker.read().await.clone()),
-        }
+    pub async fn get_queue(&self) -> CopQueueStatusSet {
+        self.queue_status.read().await.clone()
     }
 
-    pub async fn set(&self, status: Arc<CopStatus>) -> Result<()> {
-        let Some(inner) = status.as_ref().clone().inner else {
-            return Err(anyhow!("inner status is required"));
-        };
-        match inner {
-            cop_status::Inner::TaskStatus(status) => {
-                let id = status.task_id;
-                let pattern = status.status();
-                match pattern {
-                    CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled => {
-                        let pop_item = {
-                            let mut completed = self.completed.write().await;
-                            if completed.len() == self.capacity {
-                                completed.pop_front()
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(item) = pop_item {
-                            self.status.write().await.remove(&item);
-                        }
-                        {
-                            let mut completed = self.completed.write().await;
-                            completed.push_back(status.task_id);
-                        }
+    pub async fn set_task(&self, status: &CopTaskStatus) {
+        let id = status.task_id;
+        let pattern = status.status();
+        match pattern {
+            CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled => {
+                let pop_item = {
+                    let mut completed = self.completed.write().await;
+                    if completed.len() == self.capacity {
+                        completed.pop_front()
+                    } else {
+                        None
                     }
-                    _ => (),
+                };
+                if let Some(item) = pop_item {
+                    self.task_status.write().await.remove(&item);
                 }
-                self.status.write().await.insert(id, status.clone());
+                {
+                    let mut completed = self.completed.write().await;
+                    completed.push_back(status.task_id);
+                }
             }
-            cop_status::Inner::WorkerState(state) => {
-                self.worker
-                    .write()
-                    .await
-                    .worker_state
-                    .clone_from(&Some(state));
-            }
-            cop_status::Inner::TaskQueueStatus(status_set) => {
-                self.worker
-                    .write()
-                    .await
-                    .task_queue_status
-                    .clone_from(&Some(status_set));
-            }
+            _ => (),
         }
-        Ok(())
+        self.task_status.write().await.insert(id, status.clone());
+    }
+
+    pub async fn set_worker(&self, status: &CopWorkerStatus) {
+        self.worker_status.write().await.clone_from(&status);
+    }
+    
+    pub async fn set_queue(&self, status: &CopQueueStatusSet) {
+        self.queue_status.write().await.clone_from(&status);
     }
 }
+
 
 #[derive(Clone)]
 pub struct StoreCopStatusHook {
@@ -139,26 +123,56 @@ impl StoreCopStatusHook {
 }
 
 #[async_trait]
-impl Hook<Arc<CopStatus>> for StoreCopStatusHook {
-    type Output = Arc<CopStatus>;
+impl Hook<Arc<CopTaskStatus>> for StoreCopStatusHook {
+    type Output = Arc<CopTaskStatus>;
 
-    async fn hook(&mut self, cop_status: Arc<CopStatus>) -> Result<Self::Output> {
-        self.store.set(cop_status.clone()).await?;
+    async fn hook(&mut self, cop_status: Arc<CopTaskStatus>) -> Result<Self::Output> {
+        self.store.set_task(cop_status.as_ref()).await;
         Ok(cop_status)
+    }
+}
+
+#[async_trait]
+impl Hook<Arc<CopWorkerStatus>> for StoreCopStatusHook {
+    type Output = Arc<CopWorkerStatus>;
+
+    async fn hook(&mut self, worker_status: Arc<CopWorkerStatus>) -> Result<Self::Output> {
+        self.store.set_worker(worker_status.as_ref()).await;
+        Ok(worker_status)
+    }
+}
+
+#[async_trait]
+impl Hook<Arc<CopQueueStatusSet>> for StoreCopStatusHook {
+    type Output = Arc<CopQueueStatusSet>;
+
+    async fn hook(&mut self, queue_status: Arc<CopQueueStatusSet>) -> Result<Self::Output> {
+        self.store.set_queue(queue_status.as_ref()).await;
+        Ok(queue_status)
     }
 }
 
 pub struct CopService<C> {
     cop_handler: Mutex<C>,
-    cop_status_bus: Bus,
+    task_status_bus: Bus<CopTaskStatus>,
+    worker_status_bus: Bus<CopWorkerStatus>,
+    queue_status_bus: Bus<CopQueueStatusSet>,
     cop_status_store: Arc<CopStatusStore>,
 }
 
 impl<C> CopService<C> {
-    pub fn new(cop_service: C, cop_status_bus: Bus, cop_status_store: Arc<CopStatusStore>) -> Self {
+    pub fn new(
+        cop_service: C, 
+        task_status_bus: Bus<CopTaskStatus>,  
+        worker_status_bus: Bus<CopWorkerStatus>,
+        queue_status_bus: Bus<CopQueueStatusSet>,
+        cop_status_store: Arc<CopStatusStore>
+    ) -> Self {
         Self {
             cop_handler: Mutex::new(cop_service),
-            cop_status_bus,
+            task_status_bus,
+            worker_status_bus,
+            queue_status_bus,
             cop_status_store,
         }
     }
@@ -174,17 +188,47 @@ where
     C: super::Handle<Arc<CopCommand>> + Send + Sync + 'static,
     C::Response: Send + IsTimeout + 'static,
 {
-    type OpenStatusStreamStream = stream::BoxStream<'static, Result<StatusStreamResponse, Status>>;
+    type OpenTaskStatusStreamStream = stream::BoxStream<'static, Result<CopTaskStatusStreamResponse, Status>>;
+    type OpenWorkerStatusStreamStream = stream::BoxStream<'static, Result<CopWorkerStatusStreamResponse, Status>>;
+    type OpenQueueStatusStreamStream = stream::BoxStream<'static, Result<CopQueueStatusStreamResponse, Status>>;
 
     #[tracing::instrument(skip(self))]
-    async fn open_status_stream(
+    async fn open_task_status_stream(
         &self,
-        _request: Request<StatusStreamRequest>,
-    ) -> Result<Response<Self::OpenStatusStreamStream>, Status> {
-        let rx = self.cop_status_bus.subscribe();
+        _request: Request<CopTaskStatusStreamRequest>,
+    ) -> Result<Response<Self::OpenTaskStatusStreamStream>, Status> {
+        let rx = self.task_status_bus.subscribe();
         let stream = BroadcastStream::new(rx)
-            .map_ok(move |status| StatusStreamResponse {
-                cop_status: Some(status.as_ref().clone()),
+            .map_ok(move |status| CopTaskStatusStreamResponse {
+                task_status: Some(status.as_ref().clone()),
+            })
+            .map_err(|_| Status::data_loss("stream was lagged"));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn open_worker_status_stream(
+        &self,
+        _request: Request<CopWorkerStatusStreamRequest>,
+    ) -> Result<Response<Self::OpenWorkerStatusStreamStream>, Status> {
+        let rx = self.worker_status_bus.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .map_ok(move |status| CopWorkerStatusStreamResponse {
+                worker_status: Some(status.as_ref().clone()),
+            })
+            .map_err(|_| Status::data_loss("stream was lagged"));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn open_queue_status_stream(
+        &self,
+        _request: Request<CopQueueStatusStreamRequest>,
+    ) -> Result<Response<Self::OpenQueueStatusStreamStream>, Status> {
+        let rx = self.queue_status_bus.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .map_ok(move |status| CopQueueStatusStreamResponse {
+                queue_status: Some(status.as_ref().clone()),
             })
             .map_err(|_| Status::data_loss("stream was lagged"));
         Ok(Response::new(Box::pin(stream)))
@@ -193,44 +237,46 @@ where
     #[tracing::instrument(skip(self))]
     async fn get_task_status(
         &self,
-        request: Request<GetTaskStatusRequest>,
-    ) -> Result<Response<GetTaskStatusResponse>, Status> {
+        request: Request<GetCopTaskStatusRequest>,
+    ) -> Result<Response<GetCopTaskStatusResponse>, Status> {
         let message = request.get_ref();
-        let status = self.cop_status_store.get(&message.task_id).await;
-        Ok(Response::new(GetTaskStatusResponse {
+        let status = self.cop_status_store.get_task(&message.task_id).await;
+        Ok(Response::new(GetCopTaskStatusResponse {
             task_status: status,
         }))
     }
     #[tracing::instrument(skip(self))]
     async fn get_worker_status(
         &self,
-        _request: Request<GetWorkerStatusRequest>,
-    ) -> Result<Response<GetWorkerStatusResponse>, Status> {
+        _request: Request<GetCopWorkerStatusRequest>,
+    ) -> Result<Response<GetCopWorkerStatusResponse>, Status> {
         let worker_status = self.cop_status_store.get_worker().await;
-        Ok(Response::new(GetWorkerStatusResponse {
+        Ok(Response::new(GetCopWorkerStatusResponse {
             worker_status: Some(worker_status),
         }))
     }
 
     #[tracing::instrument(skip(self))]
-    async fn get_all_status(
+    async fn get_queue_status(
         &self,
-        _request: Request<GetAllStatusRequest>,
-    ) -> Result<Response<GetAllStatusResponse>, Status> {
-        let statuses = self.cop_status_store.get_all().await;
-        Ok(Response::new(statuses))
+        _request: Request<GetCopQueueStatusRequest>,
+    ) -> Result<Response<GetCopQueueStatusResponse>, Status> {
+        let queue_status = self.cop_status_store.get_queue().await;
+        Ok(Response::new(GetCopQueueStatusResponse {
+            queue_status: Some(queue_status),
+        }))
     }
 
     #[tracing::instrument(skip(self))]
     async fn post_command(
         &self,
-        request: Request<PostCommandRequest>,
-    ) -> Result<Response<PostCommandResponse>, Status> {
+        request: Request<PostCopCommandRequest>,
+    ) -> Result<Response<PostCopCommandResponse>, Status> {
         let message = request.into_inner();
 
         let cop_command = message
             .command
-            .ok_or_else(|| Status::invalid_argument("tco is required"))?;
+            .ok_or_else(|| Status::invalid_argument("cop command is required"))?;
 
         fn internal_error<E: Debug>(e: E) -> Status {
             Status::internal(format!("{:?}", e))
@@ -251,6 +297,6 @@ where
             ));
         }
 
-        Ok(Response::new(PostCommandResponse {}))
+        Ok(Response::new(PostCopCommandResponse {}))
     }
 }
