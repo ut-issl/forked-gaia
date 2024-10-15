@@ -245,6 +245,18 @@ where
             task_status: status,
         }))
     }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_all_task_status(
+        &self,
+        _request: Request<GetAllCopTaskStatusRequest>,
+    ) -> Result<Response<GetAllCopTaskStatusResponse>, Status> {
+        let task_status = self.cop_status_store.task_status.read().await.clone();
+        Ok(Response::new(GetAllCopTaskStatusResponse {
+            task_status,
+        }))
+    }
+
     #[tracing::instrument(skip(self))]
     async fn get_worker_status(
         &self,
