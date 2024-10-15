@@ -81,17 +81,17 @@ impl CopRecordHook {
 impl Hook<Arc<CopTaskStatus>> for CopRecordHook {
     type Output = Arc<CopTaskStatus>;
 
-    async fn hook(&mut self, cop_status: Arc<CopTaskStatus>) -> Result<Self::Output> {
+    async fn hook(&mut self, task_status: Arc<CopTaskStatus>) -> Result<Self::Output> {
         let ret = self
             .recorder_client
             .post_cop_task_status(PostCopTaskStatusRequest {
-                cop_status: Some(cop_status.as_ref().clone()),
+                task_status: Some(task_status.as_ref().clone()),
             })
             .await;
         if let Err(e) = ret {
             error!("failed to record COP status: {}", e);
         }
-        Ok(cop_status)
+        Ok(task_status)
     }
 }
 

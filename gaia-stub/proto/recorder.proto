@@ -34,7 +34,7 @@ message PostTelemetryResponse {
 }
 
 message PostCopTaskStatusRequest {
-  cop.CopTaskStatus cop_status = 1;
+  cop.CopTaskStatus task_status = 1;
 }
 
 message PostCopTaskStatusResponse {
