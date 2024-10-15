@@ -6,6 +6,7 @@ use std::{collections::VecDeque, fmt::Display, time};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use gaia_ccsds_c2a::ccsds::tc::sync_and_channel_coding::FrameType;
 use gaia_ccsds_c2a::ccsds::{
     aos,
@@ -17,6 +18,7 @@ use gaia_tmtc::cop::{
 };
 use gaia_tmtc::tco_tmiv::{Tco, Tmiv, TmivField};
 use gaia_tmtc::Handle;
+use prost_types::Timestamp;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::error;
 
@@ -155,7 +157,7 @@ impl Reporter {
                     .recv()
                     .await
                     .ok_or(anyhow!("CLCW connection has gone"))?;
-                let now = time::SystemTime::now();
+                let now = SystemTime::now();
                 let tmiv = build_clcw_tmiv(now, &clcw);
                 if let Err(e) = tlm_handler.handle(Arc::new(tmiv)).await {
                     error!("failed to send TMIV: {}", e);
@@ -198,10 +200,15 @@ impl FopVariables {
             self.is_active
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
+        let now = chrono::Utc::now().naive_utc();
+        let timestamp = Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        };
         if let Err(e) = self.worker_state_tx.send(
             CopWorkerStatus {
                 state: state.into(),
-                timestamp: Some(SystemTime::now().into()),
+                timestamp: Some(timestamp),
             }
         ) {
             error!("failed to send FOP state: {}", e);
@@ -223,8 +230,8 @@ pub struct FopQueue {
     vs_at_id0: u32,
     executable: Arc<AtomicBool>,
     pending: VecDeque<(CopTaskId, CommandContext)>,
-    executed: VecDeque<(CopTaskId, CommandContext, SystemTime)>,
-    rejected: VecDeque<(CopTaskId, CommandContext, SystemTime)>,
+    executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
+    rejected: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
     queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
     task_status_tx: broadcast::Sender<CopTaskStatus>,
 }
@@ -296,8 +303,15 @@ impl FopQueue {
             .or_else(|| self.rejected.front().map(|(_, _, time)| *time));
         let vs_list = vec![pending_vs, executed_vs, rejected_vs];
         let head_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
-        let oldest_arrival_time = oldest_arrival_time.map(|time| time.into());
-        let timestamp = Some(SystemTime::now().into());
+        let oldest_arrival_time = oldest_arrival_time.map(|time| Timestamp {
+            seconds: time.timestamp(),
+            nanos: time.timestamp_subsec_nanos() as i32,
+        });
+        let now = chrono::Utc::now().naive_utc();
+        let timestamp = Some(Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        });
         let status = CopQueueStatusSet {
             pending,
             executed,
@@ -331,7 +345,7 @@ impl FopQueue {
         let (id, ctx, time) = match self.rejected.pop_front() {
             Some(id_ctx_time) => id_ctx_time,
             None => match self.pending.pop_front() {
-                Some((id, ctx)) => (id, ctx, SystemTime::now()),
+                Some((id, ctx)) => (id, ctx, chrono::Utc::now().naive_utc().and_utc()),
                 None => return None,
             },
         };
@@ -878,11 +892,16 @@ trait FromIdTco {
 
 impl FromIdTco for CopTaskStatus {
     fn from_id_tco((id, tco): (CopTaskId, Tco), status: CopTaskStatusPattern) -> Self {
+        let now = chrono::Utc::now().naive_utc();
+        let timestamp = Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        };
         CopTaskStatus {
             task_id: id,
             tco: Some(tco),
             status: status as i32,
-            timestamp: Some(time::SystemTime::now().into()),
+            timestamp: Some(timestamp),
         }
     }
 }
@@ -995,17 +1014,24 @@ pub fn build_tmiv_fields_from_clcw(fields: &mut Vec<TmivField>, clcw: &CLCW) {
     fields.push(field_int("CLCW_REPORT_VALUE", clcw.report_value()));
 }
 
-pub fn build_clcw_tmiv(time: time::SystemTime, clcw: &CLCW) -> Tmiv {
+pub fn build_clcw_tmiv(time: SystemTime, clcw: &CLCW) -> Tmiv {
     let plugin_received_time = time
         .duration_since(time::UNIX_EPOCH)
         .expect("incorrect system clock")
         .as_secs();
     let mut fields = vec![];
     build_tmiv_fields_from_clcw(&mut fields, clcw);
+    let now = chrono::Utc::now().naive_utc();
+    let timestamp = Some(
+        Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        }
+    );
     Tmiv {
         name: CLCW_TMIV_NAME.to_string(),
         plugin_received_time,
-        timestamp: Some(time.into()),
+        timestamp,
         fields,
     }
 }

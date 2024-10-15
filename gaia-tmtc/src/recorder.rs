@@ -136,10 +136,16 @@ impl Hook<Arc<CopCommand>> for CopRecordHook {
     type Output = Arc<CopCommand>;
 
     async fn hook(&mut self, cop_command: Arc<CopCommand>) -> Result<Self::Output> {
+        let now = chrono::Utc::now().naive_utc();
+        let timestamp = Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        };
         let ret = self
             .recorder_client
             .post_cop_command(PostCopCommandRequest {
                 command: Some(cop_command.as_ref().clone()),
+                timestamp: Some(timestamp),
             })
             .await;
         if let Err(e) = ret {
