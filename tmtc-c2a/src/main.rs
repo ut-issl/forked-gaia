@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
         queue_status_handler.clone(),
     );
 
-    let cop_command_task = fop_worker.run();
+    let cop_worker_task = fop_worker.run();
 
     let cmd_handler = handler::Builder::new()
         .option_layer(tmtc_recorder_layer.clone())
@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         ret = sat_tlm_reporter_task => Ok(ret?),
-        ret = cop_command_task => Ok(ret?),
+        ret = cop_worker_task => Ok(ret?),
         ret = kble_socket_fut => Ok(ret?),
         ret = server_task => Ok(ret?),
         ret = cop_reporter_task => Ok(ret?),
