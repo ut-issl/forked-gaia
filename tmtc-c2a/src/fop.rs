@@ -912,10 +912,19 @@ where
                             error!("response receiver has gone");
                         }
                     }
-                    cop_command::Command::SetAutoRetransmit(inner) => {
+                    cop_command::Command::SetAutoRetransmitEnable(_) => {
                         {
                             let mut variables = variables.write().await;
-                            variables.set_auto_retransmit_enable(inner.auto_retransmit);
+                            variables.set_auto_retransmit_enable(true);
+                        }
+                        if tx.send(Ok(TimeOutResponse { is_timeout: false })).is_err() {
+                            error!("response receiver has gone");
+                        }
+                    }
+                    cop_command::Command::SetAutoRetransmitDisable(_) => {
+                        {
+                            let mut variables = variables.write().await;
+                            variables.set_auto_retransmit_enable(false);
                         }
                         if tx.send(Ok(TimeOutResponse { is_timeout: false })).is_err() {
                             error!("response receiver has gone");

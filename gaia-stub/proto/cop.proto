@@ -131,7 +131,8 @@ message CopCommand {
     CopTerminateCommand terminate = 2;
     CopUnlockCommand unlock = 3;
     CopSetTimeoutCommand set_timeout = 4;
-    CopSetAutoRetransmitCommand set_auto_retransmit = 5;
+    CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 5;
+    CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
   }
 }
 
@@ -149,6 +150,8 @@ message CopSetTimeoutCommand {
   uint32 timeout_sec = 1;
 }
 
-message CopSetAutoRetransmitCommand {
-  bool auto_retransmit = 1;
+message CopSetAutoRetransmitEnableCommand {
+}
+
+message CopSetAutoRetransmitDisableCommand {
 }
