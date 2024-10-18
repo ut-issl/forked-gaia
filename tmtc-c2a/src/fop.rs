@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{collections::VecDeque, fmt::Display, time};
@@ -19,7 +19,7 @@ use gaia_tmtc::cop::{
 use gaia_tmtc::tco_tmiv::{Tco, Tmiv, TmivField};
 use gaia_tmtc::Handle;
 use prost_types::Timestamp;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use tracing::error;
 
 use crate::proto::tmtc_generic_c2a::{
@@ -178,12 +178,12 @@ pub struct FopVariables {
     is_active: Arc<AtomicBool>,
     worker_state: CopWorkerStatusPattern,
     is_auto_retransmit_enabled: Arc<AtomicBool>,
+    timeout_sec: Arc<AtomicU64>,
     last_clcw: CLCW,
     worker_state_tx: broadcast::Sender<CopWorkerStatus>,
 }
 
 impl FopVariables {
-
     pub fn set_state(&mut self, state: CopWorkerStatusPattern) {
         self.worker_state = state;
         if state == CopWorkerStatusPattern::WorkerActive {
@@ -202,6 +202,7 @@ impl FopVariables {
             CopWorkerStatus {
                 state: state.into(),
                 is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
                 timestamp: Some(timestamp),
             }
         ) {
@@ -221,6 +222,7 @@ impl FopVariables {
             CopWorkerStatus {
                 state: self.worker_state.into(),
                 is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
                 timestamp: Some(timestamp),
             }
         ) {
@@ -499,7 +501,6 @@ fn create_unlock_body() -> Vec<u8> {
 
 pub struct FopWorker<T> {
     tc_scid: u16,
-    timeout_sec: tokio::time::Duration,
     variables: FopVariables,
     queue: FopQueue,
     sync_and_channel_coding: T,
@@ -526,11 +527,11 @@ where
         let queue_status_rx = queue_status_tx.subscribe();
         Self {
             tc_scid,
-            timeout_sec: tokio::time::Duration::from_secs(20),
             variables: FopVariables {
                 is_active: Arc::new(AtomicBool::new(false)),
                 is_auto_retransmit_enabled: Arc::new(AtomicBool::new(true)),
                 worker_state: CopWorkerStatusPattern::default(),
+                timeout_sec: Arc::new(AtomicU64::new(20)),
                 last_clcw: CLCW::default(),
                 worker_state_tx,
             },
@@ -547,7 +548,6 @@ where
         self,
     ) -> (
         u16,
-        Arc<Mutex<tokio::time::Duration>>,
         Arc<RwLock<FopVariables>>,
         Arc<RwLock<FopQueue>>,
         T,
@@ -558,7 +558,6 @@ where
     ) {
         (
             self.tc_scid,
-            Arc::new(Mutex::new(self.timeout_sec)),
             Arc::new(RwLock::new(self.variables)),
             Arc::new(RwLock::new(self.queue)),
             self.sync_and_channel_coding,
@@ -572,7 +571,6 @@ where
     pub async fn run(self) -> Result<()> {
         let (
             tc_scid,
-            timeout_sec,
             variables,
             queue,
             sync_and_channel_coding,
@@ -585,6 +583,10 @@ where
             let mut instant = tokio::time::interval(time::Duration::from_secs(1));
             instant.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut oldest_arrival_time = None;
+            let timeout_sec = {
+                let timeout_sec = variables.read().await.timeout_sec.clone();
+                timeout_sec
+            };
             loop {
                 instant.tick().await;
                 oldest_arrival_time = match queue_rx.try_recv() {
@@ -592,12 +594,9 @@ where
                     Err(broadcast::error::TryRecvError::Empty) => oldest_arrival_time,
                     Err(_) => break Err(anyhow!("FOP queue status channel has gone")),
                 };
-                let timeout_sec = {
-                    let timeout_sec = timeout_sec.lock().await;
-                    *timeout_sec
-                };
                 if let Some(oldest_time) = &oldest_arrival_time {
-                    if tokio::time::Duration::from_secs(oldest_time.seconds as u64) > timeout_sec {
+                    let duration = chrono::Utc::now().timestamp() - oldest_time.seconds;
+                    if duration > timeout_sec.load(std::sync::atomic::Ordering::Relaxed) as i64 {
                         {
                             let mut variables = variables.write().await;
                             variables.set_state(CopWorkerStatusPattern::WorkerTimeout);
@@ -741,6 +740,10 @@ where
         };
         let mut sync_and_channel_coding_clone = sync_and_channel_coding.clone();
         let cop_command_task = async {
+            let timeout_sec = {
+                let timeout_sec = variables.read().await.timeout_sec.clone();
+                timeout_sec
+            };
             while let Some((command, tx)) = cop_command_rx.recv().await {
                 let command_inner = match command.command {
                     Some(command) => command,
@@ -775,11 +778,8 @@ where
                         }
                         let mut instant = tokio::time::interval(time::Duration::from_millis(500));
                         instant.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                        let timeout_sec = {
-                            let timeout_sec = timeout_sec.lock().await;
-                            *timeout_sec
-                        };
-                        let res = tokio::time::timeout(timeout_sec, async {
+                        let duration = time::Duration::from_secs(timeout_sec.load(std::sync::atomic::Ordering::Relaxed));
+                        let res = tokio::time::timeout(duration, async {
                             loop {
                                 let vr = {
                                     let variable = variables.read().await;
@@ -842,11 +842,8 @@ where
                             }
                             variables.set_state(CopWorkerStatusPattern::WorkerUnlocking);
                         }
-                        let timeout_sec = {
-                            let timeout_sec = timeout_sec.lock().await;
-                            *timeout_sec
-                        };
-                        let res = tokio::time::timeout(timeout_sec, async {
+                        let duration = time::Duration::from_secs(timeout_sec.load(std::sync::atomic::Ordering::Relaxed));
+                        let res = tokio::time::timeout(duration, async {
                             loop {
                                 if let Err(e) = send_type_bc(
                                     &mut sync_and_channel_coding_clone,
@@ -904,9 +901,8 @@ where
                     }
                     cop_command::Command::SetTimeout(inner) => {
                         {
-                            let mut timeout_sec = timeout_sec.lock().await;
-                            *timeout_sec =
-                                tokio::time::Duration::from_secs(inner.timeout_sec as u64);
+                            let variables = variables.write().await;
+                            variables.timeout_sec.store(inner.timeout_sec.into(), std::sync::atomic::Ordering::Relaxed);
                         }
                         if tx.send(Ok(TimeOutResponse { is_timeout: false })).is_err() {
                             error!("response receiver has gone");

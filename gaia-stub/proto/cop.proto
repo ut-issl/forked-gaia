@@ -95,7 +95,8 @@ enum CopTaskStatusPattern {
 message CopWorkerStatus {
   CopWorkerStatusPattern state = 1;
   bool is_auto_retransmit_enabled = 2;
-  google.protobuf.Timestamp timestamp = 3;
+  uint64 timeout_sec = 3;
+  google.protobuf.Timestamp timestamp = 4;
 }
 
 enum CopWorkerStatusPattern {
