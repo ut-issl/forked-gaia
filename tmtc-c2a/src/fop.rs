@@ -1057,23 +1057,23 @@ pub fn build_telemetry_component_schema_map() -> HashMap<String, TelemetryCompon
 
 pub fn build_tmiv_fields_from_clcw(fields: &mut Vec<TmivField>, clcw: &CLCW) {
     fields.push(field_int(
-        "CLCW_CONTROL_WORD_TYPE",
+        "CONTROL_WORD_TYPE",
         clcw.control_word_type(),
     ));
-    fields.push(field_int("CLCW_VERSION_NUMBER", clcw.clcw_version_number()));
-    fields.push(field_int("CLCW_STATUS_FIELD", clcw.status_field()));
-    fields.push(field_int("CLCW_COP_IN_EFFECT", clcw.cop_in_effect()));
+    fields.push(field_int("VERSION_NUMBER", clcw.clcw_version_number()));
+    fields.push(field_int("STATUS_FIELD", clcw.status_field()));
+    fields.push(field_int("COP_IN_EFFECT", clcw.cop_in_effect()));
     fields.push(field_int(
-        "CLCW_VCID",
+        "VCID",
         clcw.virtual_channel_identification(),
     ));
-    fields.push(field_int("CLCW_NO_RF_AVAILABLE", clcw.no_rf_available()));
-    fields.push(field_int("CLCW_NO_BIT_LOCK", clcw.no_bit_lock()));
-    fields.push(field_int("CLCW_LOCKOUT", clcw.lockout()));
-    fields.push(field_int("CLCW_WAIT", clcw.wait()));
-    fields.push(field_int("CLCW_RETRANSMIT", clcw.retransmit()));
-    fields.push(field_int("CLCW_FARM_B_COUNTER", clcw.farm_b_counter()));
-    fields.push(field_int("CLCW_REPORT_VALUE", clcw.report_value()));
+    fields.push(field_int("NO_RF_AVAILABLE", clcw.no_rf_available()));
+    fields.push(field_int("NO_BIT_LOCK", clcw.no_bit_lock()));
+    fields.push(field_int("LOCKOUT", clcw.lockout()));
+    fields.push(field_int("WAIT", clcw.wait()));
+    fields.push(field_int("RETRANSMIT", clcw.retransmit()));
+    fields.push(field_int("FARM_B_COUNTER", clcw.farm_b_counter()));
+    fields.push(field_int("REPORT_VALUE", clcw.report_value()));
 }
 
 pub fn build_clcw_tmiv(time: SystemTime, clcw: &CLCW) -> Tmiv {
