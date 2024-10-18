@@ -230,6 +230,25 @@ impl FopVariables {
         }
     }
 
+    pub fn set_timeout_sec(&mut self, sec: u64) {
+        self.timeout_sec.store(sec, std::sync::atomic::Ordering::Relaxed);
+        let now = chrono::Utc::now().naive_utc();
+        let timestamp = Timestamp {
+            seconds: now.and_utc().timestamp(),
+            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+        };
+        if let Err(e) = self.worker_state_tx.send(
+            CopWorkerStatus {
+                state: self.worker_state.into(),
+                is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
+                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
+                timestamp: Some(timestamp),
+            }
+        ) {
+            error!("failed to send FOP state: {}", e);
+        }
+    }
+
     pub async fn update_clcw(&mut self, clcw: CLCW) {
         if self.worker_state == CopWorkerStatusPattern::WorkerClcwUnreceived {
             self.set_state(CopWorkerStatusPattern::WorkerIdle);
@@ -901,8 +920,8 @@ where
                     }
                     cop_command::Command::SetTimeout(inner) => {
                         {
-                            let variables = variables.write().await;
-                            variables.timeout_sec.store(inner.timeout_sec.into(), std::sync::atomic::Ordering::Relaxed);
+                            let mut variables = variables.write().await;
+                            variables.set_timeout_sec(inner.timeout_sec.into());
                         }
                         if tx.send(Ok(TimeOutResponse { is_timeout: false })).is_err() {
                             error!("response receiver has gone");
