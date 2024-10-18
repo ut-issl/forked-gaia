@@ -992,7 +992,11 @@ impl Display for FopStateString {
 
 const TMIV_DESTINATION_TYPE: &str = "RT";
 const TMIV_COMPONENT_NAME: &str = "GAIA";
-const CLCW_TMIV_NAME: &str = "TF_CLCW";
+const CLCW_TELEMETRY_NAME: &str = "TF_CLCW";
+
+fn tmiv_name() -> String {
+    format!("{}.{}.{}", TMIV_DESTINATION_TYPE, TMIV_COMPONENT_NAME, CLCW_TELEMETRY_NAME)
+}
 
 pub fn build_telemetry_channel_schema_map() -> HashMap<String, TelemetryChannelSchema> {
     vec![(
@@ -1013,7 +1017,7 @@ pub fn build_telemetry_component_schema_map() -> HashMap<String, TelemetryCompon
         TelemetryComponentSchema {
             metadata: Some(TelemetryComponentSchemaMetadata { apid: 0 }),
             telemetries: vec![(
-                CLCW_TMIV_NAME.to_string(),
+                CLCW_TELEMETRY_NAME.to_string(),
                 TelemetrySchema {
                     metadata: Some(TelemetrySchemaMetadata {
                         id: 0,
@@ -1087,7 +1091,7 @@ pub fn build_clcw_tmiv(time: SystemTime, clcw: &CLCW) -> Tmiv {
         }
     );
     Tmiv {
-        name: CLCW_TMIV_NAME.to_string(),
+        name: tmiv_name().to_string(),
         plugin_received_time,
         timestamp,
         fields,
