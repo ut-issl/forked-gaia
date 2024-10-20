@@ -410,8 +410,9 @@ impl FopQueue {
     }
 
     pub fn accept(&mut self, vr: u8) {
+        println!("accept");
         let accepted_num = if let Some((head_id, _, _)) = self.executed.front() {
-            (vr + 1).wrapping_sub((head_id + self.vs_at_id0) as u8)
+            vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
         } else {
             0
         };
