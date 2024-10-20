@@ -352,6 +352,7 @@ impl FopQueue {
             rejected,
             head_vs,
             oldest_arrival_time,
+            vs_at_id0: self.vs_at_id0,
             timestamp,
         };
         if let Err(e) = self.queue_status_tx.send(status) {
@@ -410,9 +411,8 @@ impl FopQueue {
     }
 
     pub fn accept(&mut self, vr: u8) {
-        println!("accept");
         let accepted_num = if let Some((head_id, _, _)) = self.executed.front() {
-            vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
+            u8::min(vr.wrapping_sub((head_id + self.vs_at_id0) as u8), self.executed.len() as u8)
         } else {
             0
         };
@@ -473,6 +473,7 @@ impl FopQueue {
     pub fn set_vs(&mut self, vs: u8) {
         self.clear(CopTaskStatusPattern::Canceled);
         self.vs_at_id0 = vs.wrapping_sub(self.next_id as u8) as u32;
+        self.update_status();
     }
 }
 

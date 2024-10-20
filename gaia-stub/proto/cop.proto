@@ -116,8 +116,9 @@ message CopQueueStatusSet {
   CopQueueStatus executed = 2;
   CopQueueStatus rejected = 3;
   uint32 head_vs = 4;
-  google.protobuf.Timestamp oldest_arrival_time = 5;
-  google.protobuf.Timestamp timestamp = 6;
+  uint32 vs_at_id0 = 5;
+  google.protobuf.Timestamp oldest_arrival_time = 6;
+  google.protobuf.Timestamp timestamp = 7;
 }
 
 message CopQueueStatus {
