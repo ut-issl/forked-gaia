@@ -21,6 +21,7 @@ message PostCommandRequest {
 
 message PostCommandResponse {
   google.protobuf.UInt32Value task_id = 1;
+  bool through_cop = 2;
 }
 
 message CommandStreamRequest {

@@ -277,10 +277,10 @@ impl Service {
 
 #[async_trait]
 impl Handle<Arc<Tco>> for Service {
-    type Response = Option<CopTaskId>;
+    type Response = (Option<CopTaskId>, bool);
 
     async fn handle(&mut self, tco: Arc<Tco>) -> Result<Self::Response> {
-        Ok(self.try_handle_command(tco).await?)
+        Ok((self.try_handle_command(tco).await?, true))
     }
 }
 

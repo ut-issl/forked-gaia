@@ -35,7 +35,7 @@ impl<C> BrokerService<C> {
 impl<C> broker_server::Broker for BrokerService<C>
 where
     C: super::Handle<Arc<Tco>> + Send + Sync + 'static,
-    C::Response: Send + Into<Option<u32>> + 'static,
+    C::Response: Send + Into<(Option<u32>, bool)> + 'static,
 {
     type OpenCommandStreamStream =
         stream::BoxStream<'static, Result<CommandStreamResponse, Status>>;
@@ -57,16 +57,18 @@ where
             Status::internal(format!("{:?}", e))
         }
 
-        let response = self
+        let (task_id, through_cop) = self
             .cmd_handler
             .lock()
             .await
             .handle(Arc::new(tco))
             .await
-            .map_err(internal_error)?;
+            .map_err(internal_error)?
+            .into();
 
         Ok(Response::new(PostCommandResponse {
-            task_id: response.into(),
+            task_id,
+            through_cop
         }))
     }
 
