@@ -611,6 +611,7 @@ where
                 instant.tick().await;
                 oldest_arrival_time = match queue_rx.try_recv() {
                     Ok(status) => status.oldest_arrival_time,
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => oldest_arrival_time,
                     Err(broadcast::error::TryRecvError::Empty) => oldest_arrival_time,
                     Err(_) => break Err(anyhow!("FOP queue status channel has gone")),
                 };
