@@ -5,6 +5,6 @@ pub mod kble_gs;
 pub mod proto;
 pub mod registry;
 pub mod satellite;
-mod tco;
+pub mod tco;
 pub mod tco_tmiv_util;
 mod tmiv;
