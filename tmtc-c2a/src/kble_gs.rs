@@ -108,8 +108,8 @@ impl Link {
         self.tlm_tx.subscribe()
     }
 
-    pub fn get_sender(&self) -> broadcast::Sender<Vec<u8>> {
-        self.tlm_tx.clone()
+    pub fn get_cmd_sender(&self) -> mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<()>>)> {
+        self.cmd_tx.clone()
     }
 }
 
