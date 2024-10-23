@@ -20,6 +20,8 @@ message SatelliteSchema {
   map<string, TelemetryComponentSchema> telemetry_components = 2;
   map<string, CommandPrefixSchema> command_prefixes = 3;
   map<string, CommandComponentSchema> command_components = 4;
+  uint32 tc_scid = 5;
+  uint32 aos_scid = 6;
 }
 
 message TelemetryComponentSchema {

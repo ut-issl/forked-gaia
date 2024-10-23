@@ -143,7 +143,12 @@ async fn main() -> Result<()> {
         .map(BeforeHookLayer::new);
 
     let tmtc_generic_c2a_service =
-        proto::tmtc_generic_c2a::Service::new(&tlm_registry, &cmd_registry)?;
+        proto::tmtc_generic_c2a::Service::new(
+            &tlm_registry, 
+            &cmd_registry,
+            satconfig.tc_scid,
+            satconfig.aos_scid,
+        )?;
 
     let tlm_bus = telemetry::Bus::new(20);
 

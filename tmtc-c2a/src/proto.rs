@@ -16,6 +16,8 @@ pub mod tmtc_generic_c2a {
         pub fn new(
             tlm_registry: &TelemetryRegistry,
             cmd_registry: &CommandRegistry,
+            tc_scid: u16,
+            aos_scid: u8,
         ) -> anyhow::Result<Self> {
             let telemetry_channels = fop::build_telemetry_channel_schema_map()
                 .into_iter()
@@ -35,11 +37,15 @@ pub mod tmtc_generic_c2a {
                 .collect();
             let command_prefixes = cmd_registry.build_command_prefix_schema_map();
             let command_components = cmd_registry.build_command_component_schema_map();
+            let tc_scid = tc_scid as u32;
+            let aos_scid = aos_scid as u32;
             let satellite_schema = SatelliteSchema {
                 telemetry_channels,
                 telemetry_components,
                 command_prefixes,
                 command_components,
+                tc_scid,
+                aos_scid,
             };
             Ok(Self { satellite_schema })
         }
