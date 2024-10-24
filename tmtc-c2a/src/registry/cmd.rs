@@ -12,9 +12,9 @@ use crate::proto::tmtc_generic_c2a as proto;
 use crate::satconfig;
 
 pub struct TcoName {
-    prefix: String,
-    component: String,
-    command: String,
+    pub prefix: String,
+    pub component: String,
+    pub command: String,
 }
 
 impl Display for TcoName {
