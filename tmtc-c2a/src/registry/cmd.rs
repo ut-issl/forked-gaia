@@ -11,7 +11,7 @@ use itertools::Itertools;
 use crate::proto::tmtc_generic_c2a as proto;
 use crate::satconfig;
 
-struct TcoName {
+pub struct TcoName {
     prefix: String,
     component: String,
     command: String,
