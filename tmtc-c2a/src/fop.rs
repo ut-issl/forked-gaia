@@ -362,6 +362,7 @@ impl FopQueue {
 
     pub fn get_vs_for_bypass(&mut self) -> u8 {
         let id = self.next_id;
+        self.next_id += 1;
         (id + self.vs_at_id0) as u8
     }
 
