@@ -418,7 +418,7 @@ impl FopQueue {
                 0
             } else {
                 vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
-            };
+            }
         } else {
             0
         };
