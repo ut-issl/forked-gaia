@@ -374,12 +374,12 @@ impl FopQueue {
         self.next_id += 1;
         let ret = (id, ctx.tco.as_ref().clone());
         self.pending.push_back((id, ctx));
-        self.update_status();
         let id = ret.0;
         let status = CopTaskStatus::from_id_tco(ret, CopTaskStatusPattern::Pending);
         if let Err(e) = self.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
         }
+        self.update_status();
         id
     }
 
@@ -459,7 +459,6 @@ impl FopQueue {
     pub fn clear(&mut self, status_pattern: CopTaskStatusPattern) {
         self.executable
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.update_status();
         let canceled = self
             .pending
             .drain(..)
@@ -474,6 +473,7 @@ impl FopQueue {
                 error!("failed to send COP status: {}", e);
             }
         }
+        self.update_status();
     }
 
     pub fn set_vs(&mut self, vs: u8) {
