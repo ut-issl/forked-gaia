@@ -662,7 +662,7 @@ where
                     }
                 } else {
                     let mut variables = variables.write().await;
-                    if variables.worker_state == CopWorkerStatusPattern::WorkerLockout {
+                    if variables.worker_state == CopWorkerStatusPattern::WorkerUnlocking {
                         variables.set_state(CopWorkerStatusPattern::WorkerIdle);
                     }
                 }
