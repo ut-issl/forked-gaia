@@ -633,6 +633,7 @@ where
                             let mut queue = queue.write().await;
                             queue.clear(CopTaskStatusPattern::Timeout);
                         }
+                        oldest_arrival_time = None;
                     }
                 }
             }
