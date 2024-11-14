@@ -866,6 +866,8 @@ where
                             }
                             variables.set_state(CopWorkerStatusPattern::WorkerUnlocking);
                         }
+                        let mut instant = tokio::time::interval(time::Duration::from_millis(500));
+                        instant.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         let duration = time::Duration::from_secs(timeout_sec.load(std::sync::atomic::Ordering::Relaxed));
                         let res = tokio::time::timeout(duration, async {
                             loop {
@@ -886,6 +888,7 @@ where
                                         break Ok(());
                                     }
                                 }
+                                instant.tick().await;
                             }
                         })
                         .await;
