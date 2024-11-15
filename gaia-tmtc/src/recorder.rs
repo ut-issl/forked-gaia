@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use cop_recorder_client::CopRecorderClient;
 use gaia_stub::{
-    cop::{CopCommand, CopQueueStatusSet, CopTaskStatus, CopWorkerStatus},
+    cop::{CopCommand, CopQueueStatusSet, CopTaskStatus, CopVsvr, CopWorkerStatus},
     recorder::tmtc_recorder_client::TmtcRecorderClient,
     tco_tmiv::{Tco, Tmiv},
 };
@@ -152,5 +152,23 @@ impl Hook<Arc<CopCommand>> for CopRecordHook {
             error!("failed to record COP command: {}", e);
         }
         Ok(cop_command)
+    }
+}
+
+#[async_trait]
+impl Hook<Arc<CopVsvr>> for CopRecordHook {
+    type Output = Arc<CopVsvr>;
+
+    async fn hook(&mut self, vsvr: Arc<CopVsvr>) -> Result<Self::Output> {
+        let ret = self
+            .recorder_client
+            .post_cop_vsvr(PostCopVsvrRequest {
+                vsvr: Some(vsvr.as_ref().clone()),
+            })
+            .await;
+        if let Err(e) = ret {
+            error!("failed to record COP VSVR: {}", e);
+        }
+        Ok(vsvr)
     }
 }

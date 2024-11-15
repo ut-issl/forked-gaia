@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
     let task_bus = cop::Bus::new(20);
     let worker_bus = cop::Bus::new(20);
     let queue_bus = cop::Bus::new(20);
+    let vsvr_bus = cop::Bus::new(20);
 
     let cop_status_store = Arc::new(cop::CopStatusStore::new(40));
     let store_cop_status_hook = cop::StoreCopStatusHook::new(cop_status_store.clone());
@@ -180,6 +181,11 @@ async fn main() -> Result<()> {
         .before_hook(store_cop_status_hook.clone())
         .option_layer(cop_recorder_layer.clone())
         .build(queue_bus.clone());
+
+    let vsvr_handler = handler::Builder::new()
+        .before_hook(store_cop_status_hook.clone())
+        .option_layer(cop_recorder_layer.clone())
+        .build(vsvr_bus.clone());
 
     let (link, socket) = kble_gs::new();
     let kble_socket_fut = socket.serve((args.kble_addr, args.kble_port));
@@ -199,6 +205,7 @@ async fn main() -> Result<()> {
         task_status_handler.clone(),
         worker_status_handler.clone(),
         queue_status_handler.clone(),
+        vsvr_handler.clone(),
     );
 
     let cop_worker_task = fop_worker.run();
@@ -215,7 +222,7 @@ async fn main() -> Result<()> {
     let server_task = {
         let broker_service = BrokerService::new(cmd_handler, tlm_bus, last_tmiv_store);
         let broker_server = BrokerServer::new(broker_service);
-        let cop_service = CopService::new(cop_handler, task_bus, worker_bus, queue_bus, cop_status_store);
+        let cop_service = CopService::new(cop_handler, task_bus, worker_bus, queue_bus, vsvr_bus, cop_status_store);
         let cop_server = CopServer::new(cop_service);
 
         let tmtc_generic_c2a_server = TmtcGenericC2aServer::new(tmtc_generic_c2a_service);

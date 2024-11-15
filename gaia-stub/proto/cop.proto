@@ -10,10 +10,12 @@ service Cop {
   rpc OpenTaskStatusStream(CopTaskStatusStreamRequest) returns (stream CopTaskStatusStreamResponse);
   rpc OpenWorkerStatusStream(CopWorkerStatusStreamRequest) returns (stream CopWorkerStatusStreamResponse);
   rpc OpenQueueStatusStream(CopQueueStatusStreamRequest) returns (stream CopQueueStatusStreamResponse);
+  rpc OpenVsvrStream(CopVsvrStreamRequest) returns (stream CopVsvrStreamResponse);
   rpc GetTaskStatus(GetCopTaskStatusRequest) returns (GetCopTaskStatusResponse);
   rpc GetAllTaskStatus(GetAllCopTaskStatusRequest) returns (GetAllCopTaskStatusResponse);
   rpc GetWorkerStatus(GetCopWorkerStatusRequest) returns (GetCopWorkerStatusResponse);
   rpc GetQueueStatus(GetCopQueueStatusRequest) returns (GetCopQueueStatusResponse);
+  rpc GetVsvr(GetCopVsvrRequest) returns (GetCopVsvrResponse);
   rpc PostCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }
 
@@ -36,6 +38,13 @@ message CopQueueStatusStreamRequest {
 
 message CopQueueStatusStreamResponse {
   CopQueueStatusSet queue_status = 1;
+}
+
+message CopVsvrStreamRequest {
+}
+
+message CopVsvrStreamResponse {
+  CopVsvr vsvr = 1;
 }
 
 message GetCopTaskStatusRequest {
@@ -67,11 +76,24 @@ message GetCopQueueStatusResponse {
   CopQueueStatusSet queue_status = 1;
 }
 
+message GetCopVsvrRequest {
+}
+
+message GetCopVsvrResponse {
+  CopVsvr vsvr = 1;
+}
+
 message PostCopCommandRequest {
   CopCommand command = 1;
 }
 
 message PostCopCommandResponse {
+}
+
+message CopVsvr {
+  uint32 vs = 1;
+  uint32 vr = 2;
+  google.protobuf.Timestamp timestamp = 3;
 }
 
 message CopTaskStatus {

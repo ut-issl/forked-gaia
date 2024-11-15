@@ -49,6 +49,7 @@ pub struct CopStatusStore {
     completed: RwLock<VecDeque<u32>>,
     worker_status: RwLock<CopWorkerStatus>,
     queue_status: RwLock<CopQueueStatusSet>,
+    vsvr: RwLock<CopVsvr>,
     capacity: usize,
 }
 
@@ -59,6 +60,7 @@ impl CopStatusStore {
             completed: RwLock::new(VecDeque::with_capacity(capacity)),
             worker_status: RwLock::new(CopWorkerStatus::default()),
             queue_status: RwLock::new(CopQueueStatusSet::default()),
+            vsvr: RwLock::new(CopVsvr::default()),
             capacity,
         }
     }
@@ -73,6 +75,10 @@ impl CopStatusStore {
 
     pub async fn get_queue(&self) -> CopQueueStatusSet {
         self.queue_status.read().await.clone()
+    }
+
+    pub async fn get_vsvr(&self) -> CopVsvr {
+        self.vsvr.read().await.clone()
     }
 
     pub async fn set_task(&self, status: &CopTaskStatus) {
@@ -107,6 +113,10 @@ impl CopStatusStore {
     
     pub async fn set_queue(&self, status: &CopQueueStatusSet) {
         self.queue_status.write().await.clone_from(&status);
+    }
+
+    pub async fn set_vsvr(&self, status: &CopVsvr) {
+        self.vsvr.write().await.clone_from(&status);
     }
 }
 
@@ -152,11 +162,22 @@ impl Hook<Arc<CopQueueStatusSet>> for StoreCopStatusHook {
     }
 }
 
+#[async_trait]
+impl Hook<Arc<CopVsvr>> for StoreCopStatusHook {
+    type Output = Arc<CopVsvr>;
+
+    async fn hook(&mut self, vsvr: Arc<CopVsvr>) -> Result<Self::Output> {
+        self.store.set_vsvr(vsvr.as_ref()).await;
+        Ok(vsvr)
+    }
+}
+
 pub struct CopService<C> {
     cop_handler: Mutex<C>,
     task_status_bus: Bus<CopTaskStatus>,
     worker_status_bus: Bus<CopWorkerStatus>,
     queue_status_bus: Bus<CopQueueStatusSet>,
+    vsvr_bus: Bus<CopVsvr>,
     cop_status_store: Arc<CopStatusStore>,
 }
 
@@ -166,6 +187,7 @@ impl<C> CopService<C> {
         task_status_bus: Bus<CopTaskStatus>,  
         worker_status_bus: Bus<CopWorkerStatus>,
         queue_status_bus: Bus<CopQueueStatusSet>,
+        vsvr_bus: Bus<CopVsvr>,
         cop_status_store: Arc<CopStatusStore>
     ) -> Self {
         Self {
@@ -173,6 +195,7 @@ impl<C> CopService<C> {
             task_status_bus,
             worker_status_bus,
             queue_status_bus,
+            vsvr_bus,
             cop_status_store,
         }
     }
@@ -191,6 +214,7 @@ where
     type OpenTaskStatusStreamStream = stream::BoxStream<'static, Result<CopTaskStatusStreamResponse, Status>>;
     type OpenWorkerStatusStreamStream = stream::BoxStream<'static, Result<CopWorkerStatusStreamResponse, Status>>;
     type OpenQueueStatusStreamStream = stream::BoxStream<'static, Result<CopQueueStatusStreamResponse, Status>>;
+    type OpenVsvrStreamStream = stream::BoxStream<'static, Result<CopVsvrStreamResponse, Status>>;
 
     #[tracing::instrument(skip(self))]
     async fn open_task_status_stream(
@@ -229,6 +253,20 @@ where
         let stream = BroadcastStream::new(rx)
             .map_ok(move |status| CopQueueStatusStreamResponse {
                 queue_status: Some(status.as_ref().clone()),
+            })
+            .map_err(|_| Status::data_loss("stream was lagged"));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn open_vsvr_stream(
+        &self,
+        _request: Request<CopVsvrStreamRequest>,
+    ) -> Result<Response<Self::OpenVsvrStreamStream>, Status> {
+        let rx = self.vsvr_bus.subscribe();
+        let stream = BroadcastStream::new(rx)
+            .map_ok(move |status| CopVsvrStreamResponse {
+                vsvr: Some(status.as_ref().clone()),
             })
             .map_err(|_| Status::data_loss("stream was lagged"));
         Ok(Response::new(Box::pin(stream)))
@@ -276,6 +314,17 @@ where
         let queue_status = self.cop_status_store.get_queue().await;
         Ok(Response::new(GetCopQueueStatusResponse {
             queue_status: Some(queue_status),
+        }))
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn get_vsvr(
+        &self,
+        _request: Request<GetCopVsvrRequest>,
+    ) -> Result<Response<GetCopVsvrResponse>, Status> {
+        let vsvr = self.cop_status_store.get_vsvr().await;
+        Ok(Response::new(GetCopVsvrResponse {
+            vsvr: Some(vsvr),
         }))
     }
 

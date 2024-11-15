@@ -14,7 +14,7 @@ use gaia_ccsds_c2a::ccsds::{
     tc::{self, clcw::CLCW},
 };
 use gaia_tmtc::cop::{
-    cop_command, CopCommand, CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern
+    cop_command, CopCommand, CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopVsvr, CopWorkerStatus, CopWorkerStatusPattern
 };
 use gaia_tmtc::tco_tmiv::{Tco, Tmiv, TmivField};
 use gaia_tmtc::Handle;
@@ -111,19 +111,22 @@ impl Reporter {
         }
     }
 
-    pub async fn run<TLM, TH, WH, QH>(
+    pub async fn run<TLM, TH, WH, QH, VH>(
         mut self, 
         mut tlm_handler: TLM, 
         mut task_handler: TH, 
         mut worker_handler: WH,
         mut queue_handler: QH,
+        vsvr_handler: VH,
     ) -> Result<()>
     where
         TH: Handle<Arc<CopTaskStatus>, Response = ()> + Clone,
         WH: Handle<Arc<CopWorkerStatus>, Response = ()> + Clone,
         QH: Handle<Arc<CopQueueStatusSet>, Response = ()> + Clone,
+        VH: Handle<Arc<CopVsvr>, Response = ()> + Clone,
         TLM: Handle<Arc<Tmiv>, Response = ()> + Clone,
     {
+        let vsvr = Arc::new(RwLock::new(CopVsvr::default()));
         let task_status_rx_task = async {
             loop {
                 let status = self.task_status_rx.recv().await?;
@@ -141,15 +144,31 @@ impl Reporter {
                 }
             }
         };
+        let mut vsvr_handler_clone = vsvr_handler.clone();
         let queue_status_rx_task = async {
             loop {
                 let status = self.queue_status_rx.recv().await?;
+                {
+                    let now = chrono::Utc::now().naive_utc();
+                    let timestamp = Some(Timestamp {
+                        seconds: now.and_utc().timestamp(),
+                        nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+                    });
+                    let mut vsvr = vsvr.write().await;
+                    vsvr.vs = status.head_vs;
+                    vsvr.timestamp = timestamp;
+                    if let Err(e) = vsvr_handler_clone.handle(Arc::new(vsvr.clone())).await
+                    {
+                        error!("failed to send VSVR status: {}", e);
+                    }
+                }
                 if let Err(e) = queue_handler.handle(Arc::new(status)).await
                 {
                     error!("failed to send COP status: {}", e);
                 }
             }
         };
+        let mut vsvr_handler_clone = vsvr_handler.clone();
         let clcw_rx_task = async {
             loop {
                 let clcw = self
@@ -157,6 +176,20 @@ impl Reporter {
                     .recv()
                     .await
                     .ok_or(anyhow!("CLCW connection has gone"))?;
+                {
+                    let now = chrono::Utc::now().naive_utc();
+                    let timestamp = Some(Timestamp {
+                        seconds: now.and_utc().timestamp(),
+                        nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+                    });
+                    let mut vsvr = vsvr.write().await;
+                    vsvr.vr = clcw.report_value() as u32;
+                    vsvr.timestamp = timestamp;
+                    if let Err(e) = vsvr_handler_clone.handle(Arc::new(vsvr.clone())).await
+                    {
+                        error!("failed to send VSVR status: {}", e);
+                    }
+                }
                 let now = SystemTime::now();
                 let tmiv = build_clcw_tmiv(now, &clcw);
                 if let Err(e) = tlm_handler.handle(Arc::new(tmiv)).await {

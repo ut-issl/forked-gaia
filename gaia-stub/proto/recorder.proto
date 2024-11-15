@@ -15,6 +15,7 @@ service CopRecorder {
   rpc PostCopTaskStatus(PostCopTaskStatusRequest) returns (PostCopTaskStatusResponse);
   rpc PostCopWorkerStatus(PostCopWorkerStatusRequest) returns (PostCopWorkerStatusResponse);
   rpc PostCopQueueStatus(PostCopQueueStatusRequest) returns (PostCopQueueStatusResponse);
+  rpc PostCopVsvr(PostCopVsvrRequest) returns (PostCopVsvrResponse);
   rpc PostCopCommand(PostCopCommandRequest) returns (PostCopCommandResponse);
 }
 
@@ -52,6 +53,13 @@ message PostCopQueueStatusRequest {
 }
 
 message PostCopQueueStatusResponse {
+}
+
+message PostCopVsvrRequest {
+  cop.CopVsvr vsvr = 1;
+}
+
+message PostCopVsvrResponse {
 }
 
 message PostCopCommandRequest {
