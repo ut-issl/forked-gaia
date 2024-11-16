@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -651,7 +652,10 @@ where
                 instant.tick().await;
                 oldest_arrival_time = match queue_rx.try_recv() {
                     Ok(status) => status.oldest_arrival_time,
-                    Err(broadcast::error::TryRecvError::Lagged(_)) => oldest_arrival_time,
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                        error!("lagged FOP queue status");
+                        oldest_arrival_time
+                    },
                     Err(broadcast::error::TryRecvError::Empty) => oldest_arrival_time,
                     Err(_) => break Err(anyhow!("FOP queue status channel has gone")),
                 };
