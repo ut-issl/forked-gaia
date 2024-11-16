@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::error;
+
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -375,6 +375,7 @@ impl FopQueue {
             seconds: time.timestamp(),
             nanos: time.timestamp_subsec_nanos() as i32,
         });
+        println!("oldest_arrival_time: {:?}", oldest_arrival_time);
         let now = chrono::Utc::now().naive_utc();
         let timestamp = Some(Timestamp {
             seconds: now.and_utc().timestamp(),
