@@ -658,6 +658,7 @@ where
                 if let Some(oldest_time) = &oldest_arrival_time {
                     let duration = chrono::Utc::now().timestamp() - oldest_time.seconds;
                     if duration > timeout_sec.load(std::sync::atomic::Ordering::Relaxed) as i64 {
+                        error!("oldest_time: {:?}, duration: {}", oldest_time, duration);
                         {
                             let mut variables = variables.write().await;
                             variables.set_state(CopWorkerStatusPattern::WorkerTimeout);
