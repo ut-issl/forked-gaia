@@ -651,15 +651,17 @@ where
             };
             loop {
                 instant.tick().await;
-                oldest_arrival_time = match queue_rx.try_recv() {
-                    Ok(status) => status.oldest_arrival_time,
-                    Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                        error!("lagged FOP queue status");
-                        oldest_arrival_time
-                    },
-                    Err(broadcast::error::TryRecvError::Empty) => oldest_arrival_time,
-                    Err(_) => break Err(anyhow!("FOP queue status channel has gone")),
-                };
+                loop {
+                    match queue_rx.try_recv() {
+                        Ok(status) => oldest_arrival_time = status.oldest_arrival_time,
+                        Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                            error!("lagged FOP queue status");
+                            continue;
+                        },
+                        Err(broadcast::error::TryRecvError::Empty) => break Ok(()),
+                        Err(_) => break Err(anyhow!("FOP queue status channel has gone")),
+                    }
+                }?;
                 if let Some(oldest_time) = &oldest_arrival_time {
                     let duration = chrono::Utc::now().timestamp() - oldest_time.seconds;
                     if duration > timeout_sec.load(std::sync::atomic::Ordering::Relaxed) as i64 {
