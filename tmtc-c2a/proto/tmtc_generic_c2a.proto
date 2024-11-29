@@ -8,8 +8,7 @@ service TmtcGenericC2a {
   rpc GetSatelliteSchema(GetSatelliteSchemaRequest) returns (GetSateliteSchemaResponse);
 }
 
-service TmtcSchemaManager {
-  rpc PostRawSchema(PostRawSchemaRequest) returns (PostRawSchemaResponse);
+service TmtcSchemaBuilder {
   rpc BuildSatelliteSchema(BuildSatelliteSchemaRequest) returns (BuildSatelliteSchemaResponse);
 }
 
@@ -20,40 +19,12 @@ message GetSateliteSchemaResponse {
   SatelliteSchema satellite_schema = 1;
 }
 
-message PostRawSchemaRequest {
-  RawSchema raw_schema = 1;
-}
-
-message PostRawSchemaResponse {
-  string schema_id = 1;
-}
-
 message BuildSatelliteSchemaRequest {
   SchemaIdMap schema_id_map = 1;
 }
 
 message BuildSatelliteSchemaResponse {
   SatelliteSchema satellite_schema = 1;
-}
-
-message RawSchema {
-  oneof schema {
-    RawC2aSchema c2a = 1;
-    OtherSchema other = 2;
-  }
-}
-
-message RawC2aSchema {
-  string tlmcmddb = 1;
-  string package_name = 2;
-  string url = 3;
-  string git_version = 4;
-}
-
-message OtherSchema {
-  string package_name = 1;
-  string url = 2;
-  string git_version = 3;
 }
 
 message SchemaIdMap {
