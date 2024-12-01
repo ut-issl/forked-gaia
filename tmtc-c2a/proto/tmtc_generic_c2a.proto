@@ -20,14 +20,14 @@ message GetSateliteSchemaResponse {
 }
 
 message BuildSatelliteSchemaRequest {
-  SchemaIdMap schema_id_map = 1;
+  SchemaIdTree schema_id_tree = 1;
 }
 
 message BuildSatelliteSchemaResponse {
   SatelliteSchema satellite_schema = 1;
 }
 
-message SchemaIdMap {
+message SchemaIdTree {
   oneof id {
     RouterSchemaId router = 1;
     EndpointSchemaId endpoint = 2;
@@ -36,7 +36,7 @@ message SchemaIdMap {
 
 message RouterSchemaId {
   string router_id = 1;
-  repeated SchemaIdMap ids = 2;
+  repeated SchemaIdTree ids = 2;
 }
 
 message EndpointSchemaId {
