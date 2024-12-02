@@ -27,6 +27,11 @@ message BuildSatelliteSchemaResponse {
   SatelliteSchema satellite_schema = 1;
 }
 
+message SchemaId {
+  SchemaIdTree schema_id_tree = 1;
+  string endpoint_uri = 2;
+}
+
 message SchemaIdTree {
   oneof id {
     RouterSchemaId router = 1;
