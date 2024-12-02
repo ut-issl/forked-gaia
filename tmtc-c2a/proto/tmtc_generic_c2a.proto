@@ -20,7 +20,7 @@ message GetSateliteSchemaResponse {
 }
 
 message BuildSatelliteSchemaRequest {
-  SchemaIdTree schema_id_tree = 1;
+  SchemaId schema_id = 1;
 }
 
 message BuildSatelliteSchemaResponse {
