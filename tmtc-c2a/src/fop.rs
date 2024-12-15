@@ -209,90 +209,6 @@ impl Reporter {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct FopVariables {
-    is_active: Arc<AtomicBool>,
-    worker_state: CopWorkerStatusPattern,
-    is_auto_retransmit_enabled: Arc<AtomicBool>,
-    timeout_sec: Arc<AtomicU64>,
-    last_clcw: CLCW,
-    worker_state_tx: broadcast::Sender<CopWorkerStatus>,
-}
-
-impl FopVariables {
-    pub fn set_state(&mut self, state: CopWorkerStatusPattern) {
-        self.worker_state = state;
-        if state == CopWorkerStatusPattern::WorkerActive {
-            self.is_active
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            self.is_active
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-        let now = chrono::Utc::now().naive_utc();
-        let timestamp = Timestamp {
-            seconds: now.and_utc().timestamp(),
-            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
-        };
-        if let Err(e) = self.worker_state_tx.send(
-            CopWorkerStatus {
-                state: state.into(),
-                is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
-                timestamp: Some(timestamp),
-            }
-        ) {
-            error!("failed to send FOP state: {}", e);
-        }
-    }
-
-    pub fn set_auto_retransmit_enable(&mut self, flag: bool) {
-        self.is_auto_retransmit_enabled
-            .store(flag, std::sync::atomic::Ordering::Relaxed);
-        let now = chrono::Utc::now().naive_utc();
-        let timestamp = Timestamp {
-            seconds: now.and_utc().timestamp(),
-            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
-        };
-        if let Err(e) = self.worker_state_tx.send(
-            CopWorkerStatus {
-                state: self.worker_state.into(),
-                is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
-                timestamp: Some(timestamp),
-            }
-        ) {
-            error!("failed to send FOP state: {}", e);
-        }
-    }
-
-    pub fn set_timeout_sec(&mut self, sec: u64) {
-        self.timeout_sec.store(sec, std::sync::atomic::Ordering::Relaxed);
-        let now = chrono::Utc::now().naive_utc();
-        let timestamp = Timestamp {
-            seconds: now.and_utc().timestamp(),
-            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
-        };
-        if let Err(e) = self.worker_state_tx.send(
-            CopWorkerStatus {
-                state: self.worker_state.into(),
-                is_auto_retransmit_enabled: self.is_auto_retransmit_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                timeout_sec: self.timeout_sec.load(std::sync::atomic::Ordering::Relaxed),
-                timestamp: Some(timestamp),
-            }
-        ) {
-            error!("failed to send FOP state: {}", e);
-        }
-    }
-
-    pub async fn update_clcw(&mut self, clcw: CLCW) {
-        if self.worker_state == CopWorkerStatusPattern::WorkerClcwUnreceived {
-            self.set_state(CopWorkerStatusPattern::WorkerIdle);
-        }
-        self.last_clcw = clcw.clone();
-    }
-}
-
 pub type IdOffset = CopTaskId;
 
 enum FopQueueState {
@@ -394,13 +310,6 @@ impl FopQueue {
         if let Err(e) = queue_status_tx.send(status) {
             error!("failed to send FOP queue status: {}", e);
         }
-    }
-
-    pub fn get_vs_for_bypass(&mut self) -> u8 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.update_status();
-        (id + self.vs_at_id0) as u8
     }
 
     pub fn push(
