@@ -121,13 +121,13 @@ impl CommandContext {
     {
         let vcid = 0; // FIXME: make this configurable
 
-        let (frame_type, sequence_number) = match (self.tco.is_type_ad, vs) {
-            (true, Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
-            (false, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
-            (true, None) => {
+        let (frame_type, sequence_number) = match (self.tco.is_end_of_type_ad_sequence, vs) {
+            (Some(_), Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
+            (None, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
+            (Some(_), None) => {
                 return Err(anyhow!("VS is required for Type-AD"));
             }
-            (false, Some(_)) => {
+            (None, Some(_)) => {
                 warn!("VS is not allowed for Type-BD. Ignoring VS.");
                 (tc::sync_and_channel_coding::FrameType::TypeBD, 0)
             }

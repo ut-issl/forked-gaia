@@ -116,9 +116,8 @@ enum CopTaskStatusPattern {
 
 message CopWorkerStatus {
   CopWorkerStatusPattern state = 1;
-  bool is_auto_retransmit_enabled = 2;
-  uint64 timeout_sec = 3;
-  google.protobuf.Timestamp timestamp = 4;
+  uint64 timeout_sec = 2;
+  google.protobuf.Timestamp timestamp = 3;
 }
 
 enum CopWorkerStatusPattern {
@@ -126,11 +125,12 @@ enum CopWorkerStatusPattern {
   WORKER_IDLE = 1;
   WORKER_INITIALIZE = 2;
   WORKER_ACTIVE = 3;
-  WORKER_LOCKOUT = 4;
-  WORKER_UNLOCKING = 5;
-  WORKER_TIMEOUT = 6;
-  WORKER_FAILED = 7;
-  WORKER_CANCELED = 8;
+  WORKER_AUTO_RETRANSMIT_OFF = 4;
+  WORKER_LOCKOUT = 5;
+  WORKER_UNLOCKING = 6;
+  WORKER_TIMEOUT = 7;
+  WORKER_FAILED = 8;
+  WORKER_CANCELED = 9;
 }
 
 message CopQueueStatusSet {
@@ -162,6 +162,7 @@ message CopCommand {
 
 message CopInitializeCommand {
   uint32 vsvr = 1;
+  bool is_auto_retransmit_enabled = 2;
 }
 
 message CopTerminateCommand {

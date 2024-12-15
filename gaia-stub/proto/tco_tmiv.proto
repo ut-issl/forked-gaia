@@ -3,11 +3,12 @@ syntax = "proto3";
 package tco_tmiv;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
 
 message Tco {
   string name = 1;
   repeated TcoParam params = 2;
-  bool is_type_ad = 3;
+  google.protobuf.BoolValue is_end_of_type_ad_sequence = 3;
 }
 
 message TcoParam {
