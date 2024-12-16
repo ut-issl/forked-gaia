@@ -10,7 +10,7 @@ use tracing::error;
 
 use crate::satellite::CopTaskId;
 
-use super::{queue::FopQueue, worker::CommandContext};
+use super::{queue::{FopQueue, FopQueueContext}, worker::CommandContext};
 
 fn create_set_vr_body(vr: u8) -> Vec<u8> {
     vec![0b10000010, 0b00000000, vr]
@@ -78,6 +78,12 @@ impl FopStateContext {
             timestamp: Some(timestamp),
         }) {
             error!("failed to send FOP state: {}", e);
+        }
+    }
+    pub fn get_queue_context(&self) -> FopQueueContext {
+        FopQueueContext {
+            queue_status_tx: self.queue_status_tx.clone(),
+            task_status_tx: self.task_status_tx.clone(),
         }
     }
 }
@@ -493,7 +499,7 @@ impl FopStateNode for FopStateActive {
     }
     fn lockout(mut self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
         if flag {
-            self.queue.clear(CopTaskStatusPattern::Lockout, context.task_status_tx.clone(), context.queue_status_tx.clone());
+            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Lockout);
             context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
             Box::new(FopStateLockout) as Box<dyn FopStateNode>
         } else {
@@ -504,14 +510,14 @@ impl FopStateNode for FopStateActive {
         self as Box<dyn FopStateNode>
     }
     fn accept (&mut self, context: FopStateContext, vr: u8) {
-        self.queue.accept(vr, context.task_status_tx.clone(), context.queue_status_tx.clone());
+        self.queue.accept(context.get_queue_context(), vr);
     }
     fn reject (&mut self, context: FopStateContext) {
-        self.queue.reject(context.task_status_tx.clone(), context.queue_status_tx.clone());
+        self.queue.reject(context.get_queue_context());
     }
 
     fn terminate(mut self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>> {
-        self.queue.clear(CopTaskStatusPattern::Canceled, context.task_status_tx.clone(), context.queue_status_tx.clone());
+        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
         context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
         Ok(Box::new(FopStateIdle) as Box<dyn FopStateNode>)
     }
@@ -519,7 +525,7 @@ impl FopStateNode for FopStateActive {
         Err(anyhow!("start_unlocking is not allowed in active state"))
     }
     fn start_initializing(mut self: Box<Self>, context: FopStateContext, vsvr: u8, confirmation_cmd: CommandContext) -> Result<Box<dyn FopStateNode>> {
-        self.queue.clear(CopTaskStatusPattern::Canceled, context.task_status_tx.clone(), context.queue_status_tx.clone());
+        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
         tokio::spawn(async move {
             context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
             tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
@@ -531,7 +537,7 @@ impl FopStateNode for FopStateActive {
         Err(anyhow!("auto_retransmit_enable is not allowed in active state"))
     }
     fn auto_retransmit_disable(mut self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>> {
-        self.queue.clear(CopTaskStatusPattern::Canceled, context.task_status_tx.clone(), context.queue_status_tx.clone());
+        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
         context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
         Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
     }
@@ -543,12 +549,13 @@ impl FopStateNode for FopStateActive {
     }
 
     fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>> {
-        Ok(Some(self.queue.push(cmd_ctx, context.task_status_tx, context.queue_status_tx)))
+        let queue_ctx = context.get_queue_context();
+        Ok(Some(self.queue.push(queue_ctx, cmd_ctx)))
     }
 
     fn execute (mut self: Box<Self>, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async move {
-            let (vs, ctx) = match self.queue.execute(context.task_status_tx.clone(), context.queue_status_tx.clone()) {
+            let (vs, ctx) = match self.queue.execute(context.get_queue_context()) {
                 Some((vs, ctx)) => (vs, ctx),
                 None => return self as Box<dyn FopStateNode>,
             };
