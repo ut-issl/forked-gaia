@@ -1,7 +1,6 @@
 pub mod tmtc_generic_c2a {
     use crate::{
-        fop,
-        registry::{CommandRegistry, TelemetryRegistry},
+        fop, registry::{CommandRegistry, TelemetryRegistry}
     };
 
     tonic::include_proto!("tmtc_generic_c2a");
@@ -19,7 +18,7 @@ pub mod tmtc_generic_c2a {
             tc_scid: u16,
             aos_scid: u8,
         ) -> anyhow::Result<Self> {
-            let telemetry_channels = fop::build_telemetry_channel_schema_map()
+            let telemetry_channels = fop::tlmcmd::build_telemetry_channel_schema_map()
                 .into_iter()
                 .chain(
                     tlm_registry
@@ -27,7 +26,7 @@ pub mod tmtc_generic_c2a {
                         .into_iter(),
                 )
                 .collect();
-            let telemetry_components = fop::build_telemetry_component_schema_map()
+            let telemetry_components = fop::tlmcmd::build_telemetry_component_schema_map()
                 .into_iter()
                 .chain(
                     tlm_registry

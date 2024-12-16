@@ -164,7 +164,7 @@ message CopCommand {
 
 message CopInitializeCommand {
   uint32 vsvr = 1;
-  bool is_auto_retransmit_enabled = 2;
+  tco_tmiv.Tco confirmation_tco = 2;
 }
 
 message CopTerminateCommand {
