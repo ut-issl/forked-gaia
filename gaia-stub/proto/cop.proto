@@ -157,6 +157,8 @@ message CopCommand {
     CopSetTimeoutCommand set_timeout = 4;
     CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 5;
     CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
+    CopSendSetVRCommand send_set_vr = 7;
+    CopSendUnlockCommand send_unlock = 8;
   }
 }
 
@@ -179,4 +181,11 @@ message CopSetAutoRetransmitEnableCommand {
 }
 
 message CopSetAutoRetransmitDisableCommand {
+}
+
+message CopSendSetVRCommand {
+  uint32 vr = 1;
+}
+
+message CopSendUnlockCommand {
 }

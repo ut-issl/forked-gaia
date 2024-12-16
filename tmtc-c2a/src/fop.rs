@@ -858,14 +858,14 @@ impl FopStateNode for FopStateActive {
         context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
         Box::pin(async { Ok(Box::new(FopStateAutoRetransmitOff) as Box<dyn FopStateNode>) })
     }
-    fn send_set_vr_command(self: Box<Self>, _: FopStateContext, _: &'static mut (dyn tc::SyncAndChannelCoding + Send + Sync + 'static), _: u16, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>>>>> {
+    fn send_set_vr_command(&mut self, _: &'static mut (dyn tc::SyncAndChannelCoding + Send + Sync + 'static), _: u16, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in active state")) })
     }
-    fn send_unlock_command(self: Box<Self>, _: FopStateContext, _: &'static mut (dyn tc::SyncAndChannelCoding + Send + Sync + 'static), _: u16) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>>>>> {
+    fn send_unlock_command(&self, _: &'static mut (dyn tc::SyncAndChannelCoding + Send + Sync + 'static), _: u16) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in active state")) })
     }
 
-    fn append (&mut self, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    fn append (&mut self, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Option<CopTaskId>>>>> {
         unimplemented!()
     }
 
@@ -946,10 +946,15 @@ impl FopStateNode for FopStateAutoRetransmitOff {
             }
         })
     }
-    fn append (&mut self, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Option<CopTaskId>>>>> {
-        self.queue.push_back((self.next_vs, CommandContext::new(id)));
-
-        Box::pin(async { Ok(Some(id)) })
+    fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<Option<CopTaskId>>>>> {
+        self.queue.push_back((self.next_vs, cmd_ctx));
+        self.next_vs = self.next_vs.wrapping_add(1);
+        context.queue_status_tx.send(
+            CopQueueStatusSet {
+                pending: Some(CopQueueStatus { head_id: , head_tco_name: (), task_count: () })
+            }
+        )
+        Box::pin(async { Ok(None) })
     }
     
 }
@@ -973,7 +978,7 @@ trait FopStateNode {
 
     fn execute (self: Box<Self>, context: FopStateContext, sync_and_channel_coding: &'static mut (dyn tc::SyncAndChannelCoding + Send + Sync + 'static), tc_scid: u16) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 
-    fn append (&mut self, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Option<CopTaskId>>>>>;
+    fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<Option<CopTaskId>>>>>;
 }
 
 #[derive(Clone)]
@@ -1114,11 +1119,39 @@ where
         };
         Ok(())
     }
-    async fn append(&mut self) -> Result<()> {
+    async fn auto_retransmit_enable(&mut self) -> Result<()> {
+        let context = self.get_context();
+        self.inner = match self.inner.take(){
+            Some(state) => Some(state.auto_retransmit_enable(context).await?),
+            None => unreachable!(),
+        };
+        Ok(())
+    }
+    async fn auto_retransmit_disable(&mut self) -> Result<()> {
+        let context = self.get_context();
+        self.inner = match self.inner.take(){
+            Some(state) => Some(state.auto_retransmit_disable(context).await?),
+            None => unreachable!(),
+        };
+        Ok(())
+    }
+    async fn send_set_vr_command(&mut self, vr: u8) -> Result<()> {
         let context = self.get_context();
         self.inner = match self.inner.take(){
             Some(mut state) => {
-                state.append(context).await?;
+                state.send_set_vr_command(&mut self.sync_and_channel_coding, self.tc_scid, vr).await?;
+                Some(state)
+            },
+            None => unreachable!(),
+        };
+        Ok(())
+    }
+
+    async fn append(&mut self, cmd_ctx: CommandContext) -> Result<()> {
+        let context = self.get_context();
+        self.inner = match self.inner.take(){
+            Some(mut state) => {
+                state.append(context, cmd_ctx).await?;
                 Some(state)
             },
             None => unreachable!(),
