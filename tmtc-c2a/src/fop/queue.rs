@@ -33,6 +33,27 @@ impl FromIdTco for CopTaskStatus {
     }
 }
 
+trait FopQueueStateNode {
+    fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>>;
+    fn next_id(&self) -> CopTaskId;
+    fn push(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) -> CopTaskId;
+    fn execute(&mut self, context: FopQueueContext) -> Option<(u8, CommandContext)>;
+    fn accept(&mut self, context: FopQueueContext, vr: u8);
+    fn reject(&mut self, context: FopQueueContext);
+    fn clear(&mut self, context: FopQueueContext, status_pattern: CopTaskStatusPattern);
+}
+
+struct FopQueueContext {
+    task_status_tx: broadcast::Sender<CopTaskStatus>,
+    queue_status_tx: broadcast::Sender<CopQueueStatusSet>
+}
+
+struct ProcessingQueue {
+    pending: VecDeque<(CopTaskId, CommandContext)>,
+    executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
+    oldest_arrival_time: Option<DateTime<Utc>>,
+}
+
 pub struct FopQueue {
     next_id: CopTaskId,
     vs_at_id0: u32,
@@ -143,9 +164,7 @@ impl FopQueue {
 
     pub fn push(
         &mut self, 
-        ctx: CommandContext, 
-        task_status_tx: broadcast::Sender<CopTaskStatus>,
-        queue_status_tx: broadcast::Sender<CopQueueStatusSet>
+        ctx: CommandContext
     ) -> CopTaskId {
         let id = self.next_id;
         self.next_id += 1;
