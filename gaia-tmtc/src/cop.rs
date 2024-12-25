@@ -108,15 +108,15 @@ impl CopStatusStore {
     }
 
     pub async fn set_worker(&self, status: &CopWorkerStatus) {
-        self.worker_status.write().await.clone_from(&status);
+        self.worker_status.write().await.clone_from(status);
     }
     
     pub async fn set_queue(&self, status: &CopQueueStatusSet) {
-        self.queue_status.write().await.clone_from(&status);
+        self.queue_status.write().await.clone_from(status);
     }
 
     pub async fn set_vsvr(&self, status: &CopVsvr) {
-        self.vsvr.write().await.clone_from(&status);
+        self.vsvr.write().await.clone_from(status);
     }
 }
 

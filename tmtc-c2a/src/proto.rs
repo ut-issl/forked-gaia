@@ -22,16 +22,14 @@ pub mod tmtc_generic_c2a {
                 .into_iter()
                 .chain(
                     tlm_registry
-                        .build_telemetry_channel_schema_map()
-                        .into_iter(),
+                        .build_telemetry_channel_schema_map(),
                 )
                 .collect();
             let telemetry_components = fop::tlmcmd::build_telemetry_component_schema_map()
                 .into_iter()
                 .chain(
                     tlm_registry
-                        .build_telemetry_component_schema_map()
-                        .into_iter(),
+                        .build_telemetry_component_schema_map(),
                 )
                 .collect();
             let command_prefixes = cmd_registry.build_command_prefix_schema_map();

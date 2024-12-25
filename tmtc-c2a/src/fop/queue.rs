@@ -181,19 +181,16 @@ impl FopQueueStateNode for ProcessingQueue {
         if let Err(e) = context.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
         }
-        match cmd_ctx.tco.is_end_of_type_ad_sequence {
-            Some(true) => {
-                self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
-                let status = CopTaskStatus::from_id_tco(
-                    (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
-                    CopTaskStatusPattern::Pending,
-                );
-                if let Err(e) = context.task_status_tx.send(status) {
-                    error!("failed to send COP status: {}", e);
-                }
-                self.next_id += 1;
+        if let Some(true) = cmd_ctx.tco.is_end_of_type_ad_sequence {
+            self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
+            let status = CopTaskStatus::from_id_tco(
+                (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
+                CopTaskStatusPattern::Pending,
+            );
+            if let Err(e) = context.task_status_tx.send(status) {
+                error!("failed to send COP status: {}", e);
             }
-            _ => ()
+            self.next_id += 1;
         }
         self.update_status(context.queue_status_tx);
         id
@@ -381,7 +378,7 @@ impl ConfirmingQueue {
             pending,
             executed,
             rejected: Some(CopQueueStatus::default()),
-            head_vs: head_vs as u32,
+            head_vs,
             oldest_arrival_time,
             vs_at_id0: self.vs_at_id0,
             timestamp,
@@ -408,19 +405,16 @@ impl FopQueueStateNode for ConfirmingQueue {
         if let Err(e) = context.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
         }
-        match cmd_ctx.tco.is_end_of_type_ad_sequence {
-            Some(true) => {
-                self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
-                let status = CopTaskStatus::from_id_tco(
-                    (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
-                    CopTaskStatusPattern::Pending,
-                );
-                if let Err(e) = context.task_status_tx.send(status) {
-                    error!("failed to send COP status: {}", e);
-                }
-                self.next_id += 1;
+        if let Some(true) = cmd_ctx.tco.is_end_of_type_ad_sequence {
+            self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
+            let status = CopTaskStatus::from_id_tco(
+                (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
+                CopTaskStatusPattern::Pending,
+            );
+            if let Err(e) = context.task_status_tx.send(status) {
+                error!("failed to send COP status: {}", e);
             }
-            _ => ()
+            self.next_id += 1;
         }
         self.update_status(context.queue_status_tx);
         id
@@ -444,7 +438,7 @@ impl FopQueueStateNode for ConfirmingQueue {
     fn accept(mut self: Box<Self>, context: FopQueueContext, vr: u8) -> Box<dyn FopQueueStateNode> {
         if let Some((head_id, _, _)) = self.executed.front() {
             if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > (self.executed.len() + 1) as u8 {
-                return self
+                self
             } else if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
                 let accepted = self
                     .executed
@@ -497,10 +491,9 @@ impl FopQueueStateNode for ConfirmingQueue {
                 self
             }
         } else if let Some((head_id, _)) = self.pending.front() {
-            if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 as u8 {
-                return self
-            } else if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
-                return self
+            if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 
+            || vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
+                self
             } else {
                 let (id, ctx) = match self.pending.pop_front() {
                     Some((id, FopQueueTask::Confirm(ctx))) => (id, ctx),
@@ -551,7 +544,7 @@ impl FopQueueStateNode for ConfirmingQueue {
         Box::new(ProcessingQueue {
             pending: self.pending,
             executed: VecDeque::new(),
-            rejected: rejected,
+            rejected,
             oldest_arrival_time: self.oldest_arrival_time,
             confirmation_cmd: self.confirmation_cmd,
             next_id: self.next_id,

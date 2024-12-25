@@ -78,9 +78,11 @@ pub fn create_cop_task_channel() -> (CopTaskSender, CopTaskReceiver) {
     (CopTaskSender { tx }, CopTaskReceiver { rx })
 }
 
+type CopTaskSendResult = Result<Option<CopTaskId>>;
+
 #[derive(Clone)]
 pub struct CopTaskSender {
-    tx: mpsc::Sender<(Arc<Tco>, oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    tx: mpsc::Sender<(Arc<Tco>, oneshot::Sender<CopTaskSendResult>)>,
 }
 
 impl CopTaskSender {
@@ -92,7 +94,7 @@ impl CopTaskSender {
 }
 
 pub struct CopTaskReceiver {
-    rx: mpsc::Receiver<(Arc<Tco>, oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    rx: mpsc::Receiver<(Arc<Tco>, oneshot::Sender<CopTaskSendResult>)>,
 }
 
 impl CopTaskReceiver {

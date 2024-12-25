@@ -138,8 +138,8 @@ impl Service {
         if command.command.is_none() {
             return Err(anyhow!("command is required"));
         }
-        let response = self.command_tx.send(command).await??;
-        Ok(response)
+        self.command_tx.send(command).await??;
+        Ok(())
     }
 }
 
@@ -154,8 +154,8 @@ impl Handle<Arc<CopCommand>> for Service {
 
 #[derive(Clone)]
 pub struct CommandContext {
-    tc_scid: u16,
-    fat_schema: FatCommandSchema,
+    pub tc_scid: u16,
+    pub fat_schema: FatCommandSchema,
     pub tco: Arc<Tco>,
 }
 
@@ -222,6 +222,16 @@ impl CommandContext {
     }
 }
 
+type SplitedFopWorker<T> = (
+    CopTaskReceiver,
+    CLCWReceiver,
+    CopCommandReceiver,
+    Arc<Mutex<FopStateMachine<T>>>,
+    T,
+    Arc<CommandRegistry>,
+    u16,
+);
+
 pub struct FopWorker<T> 
 where
     T: tc::SyncAndChannelCoding + Clone + Send + Sync + 'static,
@@ -239,6 +249,7 @@ impl<T> FopWorker<T>
 where
     T: tc::SyncAndChannelCoding + Clone + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         task_rx: CopTaskReceiver,
         clcw_rx: CLCWReceiver,
@@ -270,15 +281,7 @@ where
 
     fn split_self(
         self,
-    ) -> (
-        CopTaskReceiver,
-        CLCWReceiver,
-        CopCommandReceiver,
-        Arc<Mutex<FopStateMachine<T>>>,
-        T,
-        Arc<CommandRegistry>,
-        u16,
-    ) {
+    ) -> SplitedFopWorker<T> {
         (
             self.task_rx,
             self.clcw_rx,
@@ -343,16 +346,14 @@ where
                 let ret = if ctx.tco.is_end_of_type_ad_sequence.is_some() {
                     let mut sm_locked = state_machine_clone.lock().await;
                     sm_locked.append(ctx)
+                } else if let Err(e) = ctx
+                    .transmit_to(&mut sync_and_channel_coding, None)
+                    .await
+                {
+                    error!("failed to send command: {}", e);
+                    Err(anyhow!("failed to transmit COP command"))
                 } else {
-                    if let Err(e) = ctx
-                        .transmit_to(&mut sync_and_channel_coding, None)
-                        .await
-                    {
-                        error!("failed to send command: {}", e);
-                        Err(anyhow!("failed to transmit COP command"))
-                    } else {
-                        Ok(None)
-                    }
+                    Ok(None)
                 };
                 if tx.send(ret).is_err() {
                     error!("response receiver has gone");
