@@ -526,10 +526,10 @@ impl FopStateNode for FopStateInitialize {
         Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >,  _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in active state")) })
+        Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in initialize state")) })
     }
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
-        Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in active state")) })
+        Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in initialize state")) })
     }
 
     fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
@@ -1037,7 +1037,7 @@ where
 mod tests {
     use crate::{fop::worker::CommandContext, registry::FatCommandSchema};
 
-    use super::{FopStateIdle, FopStateLockout, FopStateMachine, FopStateNode, FopStateUnlocking};
+    use super::{FopStateActive, FopStateAutoRetransmitOff, FopStateIdle, FopStateInitialize, FopStateLockout, FopStateMachine, FopStateNode, FopStateUnlocking};
     use std::sync::Arc;
 
     use anyhow::Result;
@@ -1049,10 +1049,6 @@ mod tests {
     where 
         T: tc::SyncAndChannelCoding + Clone + Send + Sync + 'static,
     {
-        fn get_inner(&self) -> &Option<Box<dyn FopStateNode>> {
-            &self.inner
-        }
-
         fn set_inner(&mut self, state: Box<dyn FopStateNode>) {
             self.inner = Some(state);
         }
@@ -1214,6 +1210,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1243,6 +1240,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1272,6 +1270,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1301,6 +1300,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1400,6 +1400,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1431,6 +1432,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerInitialize as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1462,6 +1464,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1592,6 +1595,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1623,6 +1627,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerUnlocking as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1720,6 +1725,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1752,6 +1758,7 @@ mod tests {
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerCanceled as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1783,6 +1790,7 @@ mod tests {
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
@@ -1818,5 +1826,381 @@ mod tests {
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerTimeout as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn initialize_without_transition() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, _worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        fop_sm.clcw_received();
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        fop_sm.set_clcw(&create_clcw(0, false, false));
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        let res = fop_sm.start_initializing(0, cmd_ctx.clone());
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in initialize state");
+        assert!(fop_sm.inner.is_some());
+
+        let res = fop_sm.auto_retransmit_enable();
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in initialize state");
+
+        let res = fop_sm.send_set_vr_command(0).await;
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "send_set_vr_command is not allowed in initialize state");
+
+        let res = fop_sm.send_unlock_command().await;
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in initialize state");
+
+        let res = fop_sm.append(create_cmd_ctx());
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "append is not allowed in initialize state");
+
+        fop_sm.execute().await;
+        assert!(fop_sm.inner.is_some());
+        assert!(mock_sc.get_transmitted().await.len() == 1);
+        assert_eq!(mock_sc.get_transmitted().await[0].0, 100);
+        assert_eq!(mock_sc.get_transmitted().await[0].2, FrameType::TypeBC);
+        assert_eq!(mock_sc.get_transmitted().await[0].4, vec![0b10000010, 0b00000000, vr]);
+    }
+
+    #[tokio::test]
+    async fn initialize_timeout() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, mut worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        fop_sm.set_timeout_sec(1);
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        fop_sm.evaluate_timeout();
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
+
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerTimeout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn initialize_cancelled() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, mut worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        let res = fop_sm.cancel();
+        assert!(res.is_ok());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
+
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerCanceled as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn initialize_auto_retransmit_disable() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, mut worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        let res = fop_sm.auto_retransmit_disable();
+        assert!(res.is_ok());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn initialize_vsvr_matched() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, mut worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        fop_sm.next_id = 50;
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        let vsvr = 10;
+
+        fop_sm.set_clcw(&create_clcw(vsvr, false, false));
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
+        assert_eq!(fop_sm.next_id, 50);
+
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerActive as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn initialize_lockout() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, mut worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        fop_sm.next_id = 50;
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateInitialize::new(vr, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
+
+        fop_sm.set_clcw(&create_clcw(0, true, false));
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
+
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+    }
+
+    #[tokio::test]
+    async fn auto_retransmit_off_without_transition() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, _worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        fop_sm.set_inner(Box::new(FopStateAutoRetransmitOff::new()));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        fop_sm.clcw_received();
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        fop_sm.set_clcw(&create_clcw(0, false, false));
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        fop_sm.set_clcw(&create_clcw(0, true, false));
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        let res = fop_sm.cancel();
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "cancel is not allowed in auto_retransmit_off state");
+        assert!(fop_sm.inner.is_some());
+
+        let res = fop_sm.start_initializing(0, create_cmd_ctx());
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in auto_retransmit_off state");
+        assert!(fop_sm.inner.is_some());
+
+        let res = fop_sm.auto_retransmit_disable();
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_disable is not allowed in auto_retransmit_off state");
+
+        let vr = 10;
+        let res = fop_sm.send_set_vr_command(vr).await;
+        assert!(res.is_ok());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+        assert_eq!(mock_sc.get_transmitted().await.len(), 1);
+        assert_eq!(mock_sc.get_transmitted().await[0].0, 100);
+        assert_eq!(mock_sc.get_transmitted().await[0].2, FrameType::TypeBC);
+        assert_eq!(mock_sc.get_transmitted().await[0].4, vec![0b10000010, 0b00000000, vr]);
+
+        let res = fop_sm.send_unlock_command().await;
+        assert!(res.is_ok());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+        assert_eq!(mock_sc.get_transmitted().await.len(), 2);
+        assert_eq!(mock_sc.get_transmitted().await[1].0, 100);
+        assert_eq!(mock_sc.get_transmitted().await[1].2, FrameType::TypeBC);
+        assert_eq!(mock_sc.get_transmitted().await[1].4, vec![0u8]);
+
+        let res = fop_sm.append(create_cmd_ctx());
+        assert!(res.is_ok());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
+
+        fop_sm.execute().await;
+        assert_eq!(mock_sc.get_transmitted().await.len(), 3);
+        assert_eq!(mock_sc.get_transmitted().await[2].0, 100);
+        assert_eq!(mock_sc.get_transmitted().await[2].2, FrameType::TypeAD);        
+        assert_eq!(mock_sc.get_transmitted().await[2].3, vr);
+    }
+
+    #[tokio::test]
+    async fn active_do_nothing() {
+        // ブロードキャストチャネルを作成
+        let (worker_tx, _worker_rx) = broadcast::channel(16);
+        let (queue_tx, _queue_rx) = broadcast::channel(16);
+        let (task_tx, _task_rx) = broadcast::channel(16);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        // モックSyncAndChannelCodingを初期化
+        let mock_sc = MockSyncAndChannelCoding::new();
+
+        let mut fop_sm = FopStateMachine::new(
+            worker_tx.clone(),
+            queue_tx.clone(),
+            task_tx.clone(),
+            mock_sc.clone(),
+            100,
+        );
+
+        let vr = 10;
+
+        fop_sm.set_inner(Box::new(FopStateActive::new(vr, 50, cmd_ctx.clone())));
+
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
+
+        fop_sm.clcw_received();
+        assert!(fop_sm.inner.is_some());
+        assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
+
+        let res = fop_sm.start_unlocking();
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "start_unlocking is not allowed in active state");
+
+        let res = fop_sm.auto_retransmit_enable();
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in active state");
+
+        let res = fop_sm.send_set_vr_command(0).await;
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "send_set_vr_command is not allowed in active state");
+
+        let res = fop_sm.send_unlock_command().await;
+        assert!(res.is_err());
+        assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in active state");
     }
 }
