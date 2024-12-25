@@ -200,13 +200,13 @@ impl CommandContext {
     {
         let vcid = 0; // FIXME: make this configurable
 
-        let (frame_type, sequence_number) = match (self.tco.is_end_of_type_ad_sequence, vs) {
-            (Some(_), Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
-            (None, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
-            (Some(_), None) => {
+        let (frame_type, sequence_number) = match (self.tco.is_type_ad, vs) {
+            (true, Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
+            (false, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
+            (true, None) => {
                 return Err(anyhow!("VS is required for Type-AD"));
             }
-            (None, Some(_)) => {
+            (false, Some(_)) => {
                 warn!("VS is not allowed for Type-BD. Ignoring VS.");
                 (tc::sync_and_channel_coding::FrameType::TypeBD, 0)
             }
@@ -343,7 +343,7 @@ where
                     fat_schema,
                     tco,
                 };
-                let ret = if ctx.tco.is_end_of_type_ad_sequence.is_some() {
+                let ret = if ctx.tco.is_type_ad {
                     let mut sm_locked = state_machine_clone.lock().await;
                     sm_locked.append(ctx)
                 } else if let Err(e) = ctx
@@ -389,24 +389,7 @@ where
                 match command_inner {
                     cop_command::Command::Initialize(inner) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let tco = match inner.confirmation_tco {
-                            None => {
-                                if tx.send(Err(anyhow!("confirmation TCO is required"))).is_err() {
-                                    error!("response receiver has gone");
-                                }
-                                continue;
-                            }
-                            Some(tco) => Arc::new(tco),
-                        };
-                        let Some(fat_schema) = registry_clone.lookup(&tco.name) else {
-                            return Err(anyhow!("unknown command: {}", tco.name));
-                        };
-                        let ctx = CommandContext {
-                            tc_scid,
-                            fat_schema,
-                            tco,
-                        };
-                        let ret = sm_locked.start_initializing(inner.vsvr as u8, ctx);
+                        let ret = sm_locked.start_initializing(inner.vsvr as u8);
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
@@ -456,6 +439,30 @@ where
                     cop_command::Command::SendUnlock(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
                         let ret =  sm_locked.send_unlock_command().await;
+                        if tx.send(ret).is_err() {
+                            error!("response receiver has gone");
+                        }
+                    }
+                    cop_command::Command::BreakPointConfirm(inner) => {
+                        let mut sm_locked = state_machine_clone.lock().await;
+                        let tco = match inner.confirmation_tco {
+                            None => {
+                                if tx.send(Err(anyhow!("confirmation TCO is required"))).is_err() {
+                                    error!("response receiver has gone");
+                                }
+                                continue;
+                            }
+                            Some(tco) => Arc::new(tco),
+                        };
+                        let Some(fat_schema) = registry_clone.lookup(&tco.name) else {
+                            return Err(anyhow!("unknown command: {}", tco.name));
+                        };
+                        let ctx = CommandContext {
+                            tc_scid,
+                            fat_schema,
+                            tco,
+                        };
+                        let ret = sm_locked.break_point_confirm(ctx);
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }

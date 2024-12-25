@@ -101,6 +101,7 @@ message CopTaskStatus {
   tco_tmiv.Tco tco = 2;
   CopTaskStatusPattern status = 3;
   google.protobuf.Timestamp timestamp = 4;
+  bool is_confirm_command = 5;
 }
 
 enum CopTaskStatusPattern {
@@ -159,12 +160,12 @@ message CopCommand {
     CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
     CopSendSetVRCommand send_set_vr = 7;
     CopSendUnlockCommand send_unlock = 8;
+    CopBreakPointConfirmCommand break_point_confirm = 9;
   }
 }
 
 message CopInitializeCommand {
   uint32 vsvr = 1;
-  tco_tmiv.Tco confirmation_tco = 2;
 }
 
 message CopTerminateCommand {
@@ -188,4 +189,8 @@ message CopSendSetVRCommand {
 }
 
 message CopSendUnlockCommand {
+}
+
+message CopBreakPointConfirmCommand {
+  tco_tmiv.Tco confirmation_tco = 1;
 }

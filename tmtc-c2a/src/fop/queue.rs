@@ -14,11 +14,11 @@ use super::worker::CommandContext;
 pub type IdOffset = CopTaskId;
 
 trait FromIdTco {
-    fn from_id_tco(id_tco: (CopTaskId, Tco), status: CopTaskStatusPattern) -> Self;
+    fn from_id_tco(id_tco: (CopTaskId, Tco), status: CopTaskStatusPattern, is_confirm_command: bool) -> Self;
 }
 
 impl FromIdTco for CopTaskStatus {
-    fn from_id_tco((id, tco): (CopTaskId, Tco), status: CopTaskStatusPattern) -> Self {
+    fn from_id_tco((id, tco): (CopTaskId, Tco), status: CopTaskStatusPattern, is_confirm_command: bool) -> Self {
         let now = chrono::Utc::now().naive_utc();
         let timestamp = Timestamp {
             seconds: now.and_utc().timestamp(),
@@ -29,6 +29,7 @@ impl FromIdTco for CopTaskStatus {
             tco: Some(tco),
             status: status as i32,
             timestamp: Some(timestamp),
+            is_confirm_command,
         }
     }
 }
@@ -37,6 +38,7 @@ trait FopQueueStateNode {
     fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>>;
     fn next_id(&self) -> CopTaskId;
     fn push(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) -> CopTaskId;
+    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext);
     fn execute(self: Box<Self>, context: FopQueueContext) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>);
     fn accept(self: Box<Self>, context: FopQueueContext, vr: u8) -> Box<dyn FopQueueStateNode>;
     fn reject(self: Box<Self>, context: FopQueueContext) -> Box<dyn FopQueueStateNode>;
@@ -67,7 +69,6 @@ struct ProcessingQueue {
     executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
     rejected: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
     oldest_arrival_time: Option<DateTime<Utc>>,
-    confirmation_cmd: CommandContext,
     next_id: CopTaskId,
     vs_at_id0: u32,
 }
@@ -76,14 +77,12 @@ impl ProcessingQueue {
     pub fn new(
         vs: u8,
         next_id: CopTaskId,
-        confirmation_cmd: CommandContext,
     ) -> Self {
         Self {
             pending: VecDeque::new(),
             executed: VecDeque::new(),
             rejected: VecDeque::new(),
             oldest_arrival_time: None,
-            confirmation_cmd,
             next_id,
             vs_at_id0: vs.wrapping_sub(next_id as u8) as u32,
         }
@@ -177,23 +176,25 @@ impl FopQueueStateNode for ProcessingQueue {
         self.next_id += 1;
         let id_tco = (id, cmd_ctx.tco.as_ref().clone());
         self.pending.push_back((id, FopQueueTask::Process(cmd_ctx.clone())));
-        let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending);
+        let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending, false);
         if let Err(e) = context.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
         }
-        if let Some(true) = cmd_ctx.tco.is_end_of_type_ad_sequence {
-            self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
-            let status = CopTaskStatus::from_id_tco(
-                (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
-                CopTaskStatusPattern::Pending,
-            );
-            if let Err(e) = context.task_status_tx.send(status) {
-                error!("failed to send COP status: {}", e);
-            }
-            self.next_id += 1;
-        }
         self.update_status(context.queue_status_tx);
         id
+    }
+    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
+        self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
+        let status = CopTaskStatus::from_id_tco(
+            (self.next_id, cmd_ctx.tco.as_ref().clone()),
+            CopTaskStatusPattern::Pending,
+            true,
+        );
+        if let Err(e) = context.task_status_tx.send(status) {
+            error!("failed to send COP status: {}", e);
+        }
+        self.next_id += 1;
+        self.update_status(context.queue_status_tx);
     }
     fn execute(
         mut self: Box<Self>,
@@ -209,6 +210,7 @@ impl FopQueueStateNode for ProcessingQueue {
                     let status = CopTaskStatus::from_id_tco(
                         (id, ctx.tco.as_ref().clone()),
                         CopTaskStatusPattern::Executed,
+                        true,
                     );
                     if let Err(e) = context.task_status_tx.send(status) {
                         error!("failed to send COP status: {}", e);
@@ -218,7 +220,6 @@ impl FopQueueStateNode for ProcessingQueue {
                             pending,
                             executed: self.executed,
                             oldest_arrival_time: self.oldest_arrival_time,
-                            confirmation_cmd: ctx.clone(),
                             next_id: self.next_id,
                             vs_at_id0: self.vs_at_id0,
                         }),
@@ -233,6 +234,7 @@ impl FopQueueStateNode for ProcessingQueue {
         let status = CopTaskStatus::from_id_tco(
             (id, ctx.tco.as_ref().clone()),
             CopTaskStatusPattern::Executed,
+            false,
         );
         if let Err(e) = context.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
@@ -263,6 +265,7 @@ impl FopQueueStateNode for ProcessingQueue {
             if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                 id_tco,
                 CopTaskStatusPattern::Accepted,
+                false,
             )) {
                 error!("failed to send COP status: {}", e);
             }
@@ -286,6 +289,7 @@ impl FopQueueStateNode for ProcessingQueue {
             if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                 id_tco,
                 CopTaskStatusPattern::Rejected,
+                false,
             )) {
                 error!("failed to send COP status: {}", e);
             }
@@ -308,7 +312,7 @@ impl FopQueueStateNode for ProcessingQueue {
             .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
         for id_tco in canceled {
             if let Err(e) = context.task_status_tx
-                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern))
+                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false))
             {
                 error!("failed to send COP status: {}", e);
             }
@@ -321,7 +325,6 @@ struct ConfirmingQueue {
     pending: VecDeque<(CopTaskId, FopQueueTask)>,
     executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
     oldest_arrival_time: Option<DateTime<Utc>>,
-    confirmation_cmd: CommandContext,
     next_id: CopTaskId,
     vs_at_id0: u32,
 }
@@ -401,23 +404,25 @@ impl FopQueueStateNode for ConfirmingQueue {
         self.next_id += 1;
         let id_tco = (id, cmd_ctx.tco.as_ref().clone());
         self.pending.push_back((id, FopQueueTask::Process(cmd_ctx.clone())));
-        let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending);
+        let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending, false);
         if let Err(e) = context.task_status_tx.send(status) {
             error!("failed to send COP status: {}", e);
         }
-        if let Some(true) = cmd_ctx.tco.is_end_of_type_ad_sequence {
-            self.pending.push_back((self.next_id, FopQueueTask::Confirm(self.confirmation_cmd.clone())));
-            let status = CopTaskStatus::from_id_tco(
-                (self.next_id, self.confirmation_cmd.tco.as_ref().clone()),
-                CopTaskStatusPattern::Pending,
-            );
-            if let Err(e) = context.task_status_tx.send(status) {
-                error!("failed to send COP status: {}", e);
-            }
-            self.next_id += 1;
-        }
         self.update_status(context.queue_status_tx);
         id
+    }
+    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
+        self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
+        let status = CopTaskStatus::from_id_tco(
+            (self.next_id, cmd_ctx.tco.as_ref().clone()),
+            CopTaskStatusPattern::Pending,
+            true,
+        );
+        if let Err(e) = context.task_status_tx.send(status) {
+            error!("failed to send COP status: {}", e);
+        }
+        self.next_id += 1;
+        self.update_status(context.queue_status_tx);
     }
     fn execute(self: Box<Self>, context: FopQueueContext) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>) {
         let (id, ctx) = match self.pending.front() {
@@ -425,6 +430,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                 let status = CopTaskStatus::from_id_tco(
                     (*id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Executed,
+                    true,
                 );
                 if let Err(e) = context.task_status_tx.send(status) {
                     error!("failed to send COP status: {}", e);
@@ -448,6 +454,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                     if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                         id_tco,
                         CopTaskStatusPattern::Accepted,
+                        false
                     )) {
                         error!("failed to send COP status: {}", e);
                     }
@@ -458,7 +465,8 @@ impl FopQueueStateNode for ConfirmingQueue {
                 };
                 let status = CopTaskStatus::from_id_tco(
                     (id, ctx.tco.as_ref().clone()),
-                    CopTaskStatusPattern::Executed,
+                    CopTaskStatusPattern::Accepted,
+                    true,
                 );
                 if let Err(e) = context.task_status_tx.send(status) {
                     error!("failed to send COP status: {}", e);
@@ -469,7 +477,6 @@ impl FopQueueStateNode for ConfirmingQueue {
                     executed: self.executed,
                     rejected: VecDeque::new(),
                     oldest_arrival_time: self.oldest_arrival_time,
-                    confirmation_cmd: self.confirmation_cmd,
                     next_id: self.next_id,
                     vs_at_id0: self.vs_at_id0,
                 })
@@ -483,6 +490,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                     if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                         id_tco,
                         CopTaskStatusPattern::Accepted,
+                        false
                     )) {
                         error!("failed to send COP status: {}", e);
                     }
@@ -502,6 +510,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                 let status = CopTaskStatus::from_id_tco(
                     (id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Executed,
+                    true,
                 );
                 if let Err(e) = context.task_status_tx.send(status) {
                     error!("failed to send COP status: {}", e);
@@ -512,7 +521,6 @@ impl FopQueueStateNode for ConfirmingQueue {
                     executed: self.executed,
                     rejected: VecDeque::new(),
                     oldest_arrival_time: self.oldest_arrival_time,
-                    confirmation_cmd: self.confirmation_cmd,
                     next_id: self.next_id,
                     vs_at_id0: self.vs_at_id0,
                 })
@@ -536,6 +544,7 @@ impl FopQueueStateNode for ConfirmingQueue {
             if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                 id_tco,
                 CopTaskStatusPattern::Rejected,
+                false,
             )) {
                 error!("failed to send COP status: {}", e);
             }
@@ -546,7 +555,6 @@ impl FopQueueStateNode for ConfirmingQueue {
             executed: VecDeque::new(),
             rejected,
             oldest_arrival_time: self.oldest_arrival_time,
-            confirmation_cmd: self.confirmation_cmd,
             next_id: self.next_id,
             vs_at_id0: self.vs_at_id0,
         })
@@ -557,15 +565,11 @@ impl FopQueueStateNode for ConfirmingQueue {
         context: FopQueueContext,
         status_pattern: CopTaskStatusPattern
     ) {
-        let canceled = self
-            .pending
-            .drain(..)
-            .map(|(id, task)| (id, task.context()))
-            .chain(self.executed.drain(..).map(|(id, ctx, _)| (id, ctx)))
+        let canceled = self.executed.drain(..).map(|(id, ctx, _)| (id, ctx))
             .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
         for id_tco in canceled {
             if let Err(e) = context.task_status_tx
-                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern))
+                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false))
             {
                 error!("failed to send COP status: {}", e);
             }
@@ -582,10 +586,9 @@ impl FopQueue {
     pub fn new(
         vs: u8,
         next_id: CopTaskId,
-        confirmation_cmd: CommandContext,
     ) -> Self {
         Self {
-            inner: Some(Box::new(ProcessingQueue::new(vs, next_id, confirmation_cmd))),
+            inner: Some(Box::new(ProcessingQueue::new(vs, next_id))),
         }
     }
     pub fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>> {
@@ -608,6 +611,17 @@ impl FopQueue {
     ) -> CopTaskId {
         match &mut self.inner {
             Some(inner) => inner.push(queue_context, ctx),
+            None => unreachable!("FopQueue is empty"),
+        }
+    }
+
+    pub fn confirm(
+        &mut self, 
+        queue_context: FopQueueContext,
+        ctx: CommandContext,
+    ) {
+        match &mut self.inner {
+            Some(inner) => inner.confirm(queue_context, ctx),
             None => unreachable!("FopQueue is empty"),
         }
     }
