@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
-use gaia_tmtc::{cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern}, tco_tmiv::Tco};
+use gaia_tmtc::{cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopQueueStatusPattern}, tco_tmiv::Tco};
 use prost_types::Timestamp;
 use tokio::sync::broadcast;
 use tracing::error;
@@ -157,6 +157,7 @@ impl ProcessingQueue {
             oldest_arrival_time,
             vs_at_id0: self.vs_at_id0,
             timestamp,
+            status: CopQueueStatusPattern::Processing.into(),
         };
         if let Err(e) = queue_status_tx.send(status) {
             error!("failed to send FOP queue status: {}", e);
@@ -385,6 +386,7 @@ impl ConfirmingQueue {
             oldest_arrival_time,
             vs_at_id0: self.vs_at_id0,
             timestamp,
+            status: CopQueueStatusPattern::Confirming.into(),
         };
         if let Err(e) = queue_status_tx.send(status) {
             error!("failed to send FOP queue status: {}", e);

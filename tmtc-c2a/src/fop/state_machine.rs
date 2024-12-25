@@ -3,7 +3,7 @@ use std::{collections::VecDeque, fmt::Display, future::Future, pin::Pin};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use gaia_ccsds_c2a::ccsds::tc::{self, clcw::CLCW, sync_and_channel_coding::FrameType};
-use gaia_tmtc::cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern};
+use gaia_tmtc::cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern, CopQueueStatusPattern};
 use prost_types::Timestamp;
 use tokio::sync::broadcast;
 use tracing::error;
@@ -812,7 +812,8 @@ impl FopStateNode for FopStateAutoRetransmitOff {
                 head_vs: vs as u32,
                 vs_at_id0: 0,
                 oldest_arrival_time: None,
-                timestamp
+                timestamp,
+                status: CopQueueStatusPattern::Processing.into(),
             }
         )?;
         Ok(None)
