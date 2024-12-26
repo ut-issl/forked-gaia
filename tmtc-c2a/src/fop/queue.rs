@@ -186,6 +186,11 @@ impl FopQueueStateNode for ProcessingQueue {
         id
     }
     fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
+        if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
+            return
+        } else if self.pending.is_empty() {
+            return
+        }
         self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
         let status = CopTaskStatus::from_id_tco(
             (self.next_id, cmd_ctx.tco.as_ref().clone()),
@@ -207,8 +212,8 @@ impl FopQueueStateNode for ProcessingQueue {
             None => match self.pending.pop_front() {
                 Some((id, FopQueueTask::Process(ctx))) => (id, ctx, chrono::Utc::now().naive_utc().and_utc()),
                 Some((id, FopQueueTask::Confirm(ctx))) => {
-                    let mut pending = self.pending;
-                    pending.push_front((id, FopQueueTask::Confirm(ctx.clone())));
+                    let pending = self.pending;
+                    let confirm = (id, ctx.clone(), chrono::Utc::now().naive_utc().and_utc());
                     let status = CopTaskStatus::from_id_tco(
                         (id, ctx.tco.as_ref().clone()),
                         CopTaskStatusPattern::Executed,
@@ -220,6 +225,7 @@ impl FopQueueStateNode for ProcessingQueue {
                     return (
                         Box::new(ConfirmingQueue{
                             pending,
+                            confirm,
                             executed: self.executed,
                             oldest_arrival_time: self.oldest_arrival_time,
                             next_id: self.next_id,
@@ -325,6 +331,7 @@ impl FopQueueStateNode for ProcessingQueue {
 
 struct ConfirmingQueue {
     pending: VecDeque<(CopTaskId, FopQueueTask)>,
+    confirm: (CopTaskId, CommandContext, DateTime<Utc>),
     executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
     oldest_arrival_time: Option<DateTime<Utc>>,
     next_id: CopTaskId,
@@ -365,7 +372,8 @@ impl ConfirmingQueue {
         let oldest_arrival_time = self
             .executed
             .front()
-            .map(|(_, _, time)| *time);
+            .map(|(_, _, time)| *time)
+            .or(Some(self.confirm.2));
         self.oldest_arrival_time = oldest_arrival_time;
         let vs_list = vec![pending_vs, executed_vs];
         let head_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
@@ -415,6 +423,11 @@ impl FopQueueStateNode for ConfirmingQueue {
         id
     }
     fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
+        if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
+            return
+        } else if self.pending.is_empty() {
+            return
+        }
         self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
         let status = CopTaskStatus::from_id_tco(
             (self.next_id, cmd_ctx.tco.as_ref().clone()),
@@ -428,19 +441,17 @@ impl FopQueueStateNode for ConfirmingQueue {
         self.update_status(context.queue_status_tx);
     }
     fn execute(self: Box<Self>, context: FopQueueContext) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>) {
-        let (id, ctx) = match self.pending.front() {
-            Some((id, FopQueueTask::Confirm(ctx))) => {
-                let status = CopTaskStatus::from_id_tco(
-                    (*id, ctx.tco.as_ref().clone()),
-                    CopTaskStatusPattern::Executed,
-                    true,
-                );
-                if let Err(e) = context.task_status_tx.send(status) {
-                    error!("failed to send COP status: {}", e);
-                }
-                ((*id + self.vs_at_id0) as u8, ctx.clone())
-            },
-            _ => unreachable!("No confirmation command in the queue"),
+        let (id, ctx) = {
+            let (id, ctx, _) = self.confirm.clone();
+            let status = CopTaskStatus::from_id_tco(
+                (id, ctx.tco.as_ref().clone()),
+                CopTaskStatusPattern::Executed,
+                true,
+            );
+            if let Err(e) = context.task_status_tx.send(status) {
+                error!("failed to send COP status: {}", e);
+            }
+            ((id + self.vs_at_id0) as u8, ctx)
         };
         (self, Some((id, ctx)))
     }
@@ -462,10 +473,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                         error!("failed to send COP status: {}", e);
                     }
                 }
-                let (id, ctx) = match self.pending.pop_front() {
-                    Some((id, FopQueueTask::Confirm(ctx))) => (id, ctx),
-                    _ => unreachable!("No confirmation command in the queue"),
-                };
+                let (id, ctx, _) = self.confirm.clone();
                 let status = CopTaskStatus::from_id_tco(
                     (id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Accepted,
@@ -501,17 +509,14 @@ impl FopQueueStateNode for ConfirmingQueue {
                 self.update_status(context.queue_status_tx);
                 self
             }
-        } else if let Some((head_id, _)) = self.pending.front() {
+        } else {
+            let (head_id, ctx, _) = self.confirm.clone();
             if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 
             || vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
                 self
             } else {
-                let (id, ctx) = match self.pending.pop_front() {
-                    Some((id, FopQueueTask::Confirm(ctx))) => (id, ctx),
-                    _ => unreachable!("No confirmation command in the queue"),
-                };
                 let status = CopTaskStatus::from_id_tco(
-                    (id, ctx.tco.as_ref().clone()),
+                    (head_id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Executed,
                     true,
                 );
@@ -528,9 +533,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                     vs_at_id0: self.vs_at_id0,
                 })
             }
-        } else {
-            unreachable!("No confirm command in the pending queue")
-        }
+        } 
     }
 
     fn reject(
@@ -552,6 +555,8 @@ impl FopQueueStateNode for ConfirmingQueue {
                 error!("failed to send COP status: {}", e);
             }
         }
+        let (confirm_id, confirm_ctx, _) = self.confirm.clone();
+        self.pending.push_front((confirm_id, FopQueueTask::Confirm(confirm_ctx)));
         self.update_status(context.queue_status_tx);
         Box::new(ProcessingQueue {
             pending: self.pending,
