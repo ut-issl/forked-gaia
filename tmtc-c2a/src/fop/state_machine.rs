@@ -825,6 +825,25 @@ impl FopStateNode for FopStateAutoRetransmitOff {
                 Some((vs, ctx)) => (vs, ctx),
                 None => return self as Box<dyn FopStateNode>,
             };
+            let now = chrono::Utc::now().naive_utc();
+            let timestamp = Some(Timestamp {
+                seconds: now.and_utc().timestamp(),
+                nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+            });
+            if let Err(e) = context.queue_status_tx.send(
+                CopQueueStatusSet {
+                    pending: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+                    executed: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+                    rejected: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+                    head_vs: vs as u32,
+                    vs_at_id0: 0,
+                    oldest_arrival_time: None,
+                    timestamp,
+                    status: CopQueueStatusPattern::Processing.into(),
+                }
+            ) {
+                error!("failed to send queue status: {}", e);
+            }
             match ctx.transmit_to(sync_and_channel_coding.as_mut(), Some(vs)).await {
                 Ok(_) => self as Box<dyn FopStateNode>,
                 Err(e) => {
