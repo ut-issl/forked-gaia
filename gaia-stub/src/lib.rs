@@ -13,7 +13,7 @@ pub mod recorder {
 
 pub mod tco_tmiv {
     tonic::include_proto!("tco_tmiv");
-    
+
     pub mod tmiv {
         pub fn get_timestamp(tmiv: &super::Tmiv, pseudo_nanos: i32) -> prost_types::Timestamp {
             tmiv.timestamp.clone().unwrap_or(prost_types::Timestamp {
@@ -54,6 +54,13 @@ pub mod cop {
                 super::CopWorkerStatusPattern::WorkerLockout => "LOCKOUT".to_string(),
                 super::CopWorkerStatusPattern::WorkerTimeout => "TIMEOUT".to_string(),
                 super::CopWorkerStatusPattern::WorkerUnlocking => "UNLOCKING".to_string(),
+            }
+        }
+
+        pub fn queue_state_to_string(queue_state: super::CopQueueStatusPattern) -> String {
+            match queue_state {
+                super::CopQueueStatusPattern::Processing => "PROCESSING".to_string(),
+                super::CopQueueStatusPattern::Confirming => "CONFIRMING".to_string(),
             }
         }
     }
