@@ -188,7 +188,7 @@ impl FopQueueStateNode for ProcessingQueue {
     fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
         if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
             return
-        } else if self.pending.is_empty() {
+        } else if self.pending.is_empty() && self.executed.is_empty() && self.rejected.is_empty() {
             return
         }
         self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
@@ -425,7 +425,7 @@ impl FopQueueStateNode for ConfirmingQueue {
     fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
         if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
             return
-        } else if self.pending.is_empty() {
+        } else if self.pending.is_empty() && self.executed.is_empty() {
             return
         }
         self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
