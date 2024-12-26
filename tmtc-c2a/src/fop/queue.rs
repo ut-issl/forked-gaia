@@ -45,6 +45,7 @@ trait FopQueueStateNode {
     fn clear(&mut self, context: FopQueueContext, status_pattern: CopTaskStatusPattern);
 }
 
+#[derive(Clone)]
 pub struct FopQueueContext {
     pub task_status_tx: broadcast::Sender<CopTaskStatus>,
     pub queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
@@ -588,7 +589,10 @@ impl FopQueue {
     pub fn new(
         vs: u8,
         next_id: CopTaskId,
+        context: FopQueueContext,
     ) -> Self {
+        let mut inner = ProcessingQueue::new(vs, next_id);
+        inner.update_status(context.queue_status_tx);
         Self {
             inner: Some(Box::new(ProcessingQueue::new(vs, next_id))),
         }
@@ -672,5 +676,106 @@ impl FopQueue {
             Some(inner) => inner.clear(queue_context, status_pattern),
             None => unreachable!("FopQueue is empty"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gaia_ccsds_c2a::access::cmd::schema::CommandSchema;
+    use gaia_tmtc::{cop::{CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern}, tco_tmiv::Tco};
+    use tokio::sync::broadcast;
+
+    use crate::{fop::{queue::{FopQueue, FopQueueContext}, worker::CommandContext}, registry::FatCommandSchema};
+
+    fn create_cmd_ctx() -> CommandContext {
+        CommandContext {
+            tco: Arc::new(Tco {
+                name: "test".to_string(),
+                params: Vec::new(),
+                is_type_ad: true,
+            }),
+            tc_scid: 100,
+            fat_schema: FatCommandSchema {
+                apid: 0,
+                command_id: 0,
+                destination_type: 0,
+                execution_type: 0,
+                has_time_indicator: false,
+                schema: CommandSchema {
+                    sized_parameters: Vec::new(),
+                    static_size: 0,
+                    has_trailer_parameter: false,
+                },
+            }
+        }
+    }
+
+    fn create_test_context() -> (FopQueueContext, broadcast::Receiver<CopTaskStatus>, broadcast::Receiver<CopQueueStatusSet>) {
+        let (task_status_tx, task_status_rx) = broadcast::channel(100);
+        let (queue_status_tx, queue_status_rx) = broadcast::channel(100);
+        let context = FopQueueContext {
+            task_status_tx,
+            queue_status_tx,
+        };
+        (context, task_status_rx, queue_status_rx)
+    }
+
+    #[test]
+    fn test_fop_queue_initialization() {
+        let initial_id = 1;
+        let vs = 10;
+        let (ctx, _, mut queue_rx) = create_test_context();
+        let queue = FopQueue::new(vs, initial_id, ctx.clone());
+        
+        assert_eq!(queue.next_id(), initial_id);
+        assert_eq!(queue.get_oldest_arrival_time(), None);
+        let status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(status.head_vs, vs as u32);
+    }
+
+    #[test]
+    fn processing_push_task() {
+        let (context, mut task_rx, mut queue_rx) = create_test_context();
+        let initial_id = 1;
+        let vs = 10;
+        let mut queue = FopQueue::new(vs, initial_id, context.clone());
+        assert_eq!(queue.next_id(), initial_id);
+        assert_eq!(queue.get_oldest_arrival_time(), None);
+        let status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(status.head_vs, vs as u32);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        let task_id = queue.push(context.clone(), cmd_ctx.clone());
+
+        assert_eq!(task_id, initial_id);
+        assert_eq!(queue.next_id(), initial_id + 1);
+
+        // ステータスが送信されているか確認
+        let status = match task_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP status: {}", e),
+        };
+        assert_eq!(status.task_id, task_id);
+        assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
+        assert!(!status.is_confirm_command);
+
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert!(queue_status.pending.is_some());
+        let pending = queue_status.pending.unwrap();
+        assert_eq!(pending.head_id, Some(task_id));
+        assert_eq!(pending.task_count, 1);
     }
 }

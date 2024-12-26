@@ -502,7 +502,7 @@ impl FopStateNode for FopStateInitialize {
     fn vsvr_matched(self: Box<Self>, context: FopStateContext, vr: u8) -> Box<dyn FopStateNode> {
         if vr == self.vsvr {
             context.send_worker_status(CopWorkerStatusPattern::WorkerActive);
-            Box::new(FopStateActive::new(self.vsvr, context.next_id)) as Box<dyn FopStateNode>
+            Box::new(FopStateActive::new(self.vsvr, context.next_id, context.get_queue_context())) as Box<dyn FopStateNode>
         } else {
             self as Box<dyn FopStateNode>
         }
@@ -578,9 +578,9 @@ struct FopStateActive{
 }
 
 impl FopStateActive {
-    fn new(vs: u8, next_id: CopTaskId) -> Self {
+    fn new(vs: u8, next_id: CopTaskId, ctx: FopQueueContext) -> Self {
         Self {
-            queue: FopQueue::new(vs, next_id),
+            queue: FopQueue::new(vs, next_id, ctx),
         }
     }
 }
@@ -592,7 +592,7 @@ impl Display for FopStateActive {
 }
 
 impl FopStateNode for FopStateActive {
-    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
+    fn evaluate_timeout(mut self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
         let now = chrono::Utc::now();
         let oldest_arrival_time = match self.queue.get_oldest_arrival_time() {
             Some(time) => time,
@@ -600,6 +600,7 @@ impl FopStateNode for FopStateActive {
         };
         if now - oldest_arrival_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) { 
             context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout);
+            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Timeout);
             Box::new(FopStateIdle) as Box<dyn FopStateNode> 
         } else {
             self as Box<dyn FopStateNode>
@@ -2201,7 +2202,7 @@ mod tests {
 
         let vr = 10;
 
-        fop_sm.set_inner(Box::new(FopStateActive::new(vr, 50)));
+        fop_sm.set_inner(Box::new(FopStateActive::new(vr, 50, fop_sm.get_context().get_queue_context())));
 
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
