@@ -147,7 +147,6 @@ impl ProcessingQueue {
             seconds: time.timestamp(),
             nanos: time.timestamp_subsec_nanos() as i32,
         });
-        println!("oldest_arrival_time: {:?}", oldest_arrival_time);
         let now = chrono::Utc::now().naive_utc();
         let timestamp = Some(Timestamp {
             seconds: now.and_utc().timestamp(),
@@ -231,15 +230,17 @@ impl FopQueueStateNode for ProcessingQueue {
                         if let Err(e) = context.task_status_tx.send(status).await {
                             error!("failed to send COP status: {}", e);
                         }
+                        let mut ret = Box::new(ConfirmingQueue{
+                            pending,
+                            confirm,
+                            executed: self.executed,
+                            oldest_arrival_time: self.oldest_arrival_time,
+                            next_id: self.next_id,
+                            vs_at_id0: self.vs_at_id0,
+                        });
+                        ret.update_status(context.queue_status_tx).await;
                         return (
-                            Box::new(ConfirmingQueue{
-                                pending,
-                                confirm,
-                                executed: self.executed,
-                                oldest_arrival_time: self.oldest_arrival_time,
-                                next_id: self.next_id,
-                                vs_at_id0: self.vs_at_id0,
-                            }) as Box<dyn FopQueueStateNode>,
+                            ret as Box<dyn FopQueueStateNode>,
                             Some(((id + self.vs_at_id0) as u8, ctx))
                         )
                     },
@@ -398,7 +399,6 @@ impl ConfirmingQueue {
             seconds: time.timestamp(),
             nanos: time.timestamp_subsec_nanos() as i32,
         });
-        println!("oldest_arrival_time: {:?}", oldest_arrival_time);
         let now = chrono::Utc::now().naive_utc();
         let timestamp = Some(Timestamp {
             seconds: now.and_utc().timestamp(),
@@ -462,7 +462,7 @@ impl FopQueueStateNode for ConfirmingQueue {
             self as Box<dyn FopQueueStateNode>
         })
     }
-    fn execute(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
+    fn execute(mut self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
         Box::pin(async move {
             let (id, ctx) = {
                 let (id, ctx, _) = self.confirm.clone();
@@ -476,6 +476,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                 }
                 ((id + self.vs_at_id0) as u8, ctx)
             };
+            self.update_status(context.queue_status_tx).await;
             (self as Box<dyn FopQueueStateNode>, Some((id, ctx)))
         })
     }
@@ -507,15 +508,16 @@ impl FopQueueStateNode for ConfirmingQueue {
                     if let Err(e) = context.task_status_tx.send(status).await {
                         error!("failed to send COP status: {}", e);
                     }
-                    self.update_status(context.queue_status_tx).await;
-                    Box::new(ProcessingQueue {
+                    let mut ret = Box::new(ProcessingQueue {
                         pending: self.pending,
                         executed: self.executed,
                         rejected: VecDeque::new(),
                         oldest_arrival_time: self.oldest_arrival_time,
                         next_id: self.next_id,
                         vs_at_id0: self.vs_at_id0,
-                    })
+                    });
+                    ret.update_status(context.queue_status_tx).await;
+                    return ret as Box<dyn FopQueueStateNode>
                 } else {
                     let accepted_num = vr.wrapping_sub((head_id + self.vs_at_id0) as u8);
                     let accepted = self
@@ -548,15 +550,16 @@ impl FopQueueStateNode for ConfirmingQueue {
                     if let Err(e) = context.task_status_tx.send(status).await {
                         error!("failed to send COP status: {}", e);
                     }
-                    self.update_status(context.queue_status_tx).await;
-                    Box::new(ProcessingQueue {
+                    let mut ret = Box::new(ProcessingQueue {
                         pending: self.pending,
                         executed: self.executed,
                         rejected: VecDeque::new(),
                         oldest_arrival_time: self.oldest_arrival_time,
                         next_id: self.next_id,
                         vs_at_id0: self.vs_at_id0,
-                    }) as Box<dyn FopQueueStateNode>
+                    });
+                    ret.update_status(context.queue_status_tx).await;
+                    ret as Box<dyn FopQueueStateNode>
                 }
             } 
         })
@@ -584,15 +587,16 @@ impl FopQueueStateNode for ConfirmingQueue {
             }
             let (confirm_id, confirm_ctx, _) = self.confirm.clone();
             self.pending.push_front((confirm_id, FopQueueTask::Confirm(confirm_ctx)));
-            self.update_status(context.queue_status_tx).await;
-            Box::new(ProcessingQueue {
+            let mut ret = Box::new(ProcessingQueue {
                 pending: self.pending,
                 executed: VecDeque::new(),
                 rejected,
                 oldest_arrival_time: self.oldest_arrival_time,
                 next_id: self.next_id,
                 vs_at_id0: self.vs_at_id0,
-            }) as Box<dyn FopQueueStateNode>
+            });
+            ret.update_status(context.queue_status_tx).await;
+            ret as Box<dyn FopQueueStateNode>
         })
     }
 
@@ -724,7 +728,7 @@ mod tests {
     use std::sync::Arc;
 
     use gaia_ccsds_c2a::access::cmd::schema::CommandSchema;
-    use gaia_tmtc::{cop::{CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern}, tco_tmiv::Tco};
+    use gaia_tmtc::{cop::{CopQueueStatusPattern, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern}, tco_tmiv::Tco};
     use tokio::sync::mpsc;
 
     use crate::{fop::{queue::{FopQueue, FopQueueContext}, worker::CommandContext}, registry::FatCommandSchema};
@@ -779,87 +783,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn processing_push_task() {
+    async fn queue_test() {
         let (context, mut task_rx, mut queue_rx) = create_test_context();
         let initial_id = 1;
-        let vs = 10;
-        let mut queue = FopQueue::new(vs, initial_id, context.clone()).await;
+        let initial_vs = 10;
+        let mut queue = FopQueue::new(initial_vs, initial_id, context.clone()).await;
         assert_eq!(queue.next_id(), initial_id);
         assert_eq!(queue.get_oldest_arrival_time(), None);
         let status = match queue_rx.try_recv() {
             Ok(status) => status,
             Err(e) => panic!("failed to receive COP queue status: {}", e),
         };
-        assert_eq!(status.head_vs, vs as u32);
-
-        let cmd_ctx = create_cmd_ctx();
-
-        let task_id = queue.push(context.clone(), cmd_ctx.clone()).await;
-
-        assert_eq!(task_id, initial_id);
-        assert_eq!(queue.next_id(), initial_id + 1);
-
-        // ステータスが送信されているか確認
-        let status = match task_rx.try_recv() {
-            Ok(status) => status,
-            Err(e) => panic!("failed to receive COP status: {}", e),
-        };
-        assert_eq!(status.task_id, task_id);
-        assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
-        assert!(!status.is_confirm_command);
-
-        // キューのステータスが更新されているか確認
-        let queue_status = match queue_rx.try_recv() {
-            Ok(status) => status,
-            Err(e) => panic!("failed to receive COP queue status: {}", e),
-        };
-        assert!(queue_status.pending.is_some());
-        let pending = queue_status.pending.unwrap();
-        assert_eq!(pending.head_id, Some(task_id));
-        assert_eq!(pending.task_count, 1);
-    }
-
-    #[tokio::test]
-    async fn processing_confirm_task() {
-        let (context, mut task_rx, mut queue_rx) = create_test_context();
-        let initial_id = 1;
-        let vs = 10;
-        let mut queue = FopQueue::new(vs, initial_id, context.clone()).await;
-        assert_eq!(queue.next_id(), initial_id);
-        assert_eq!(queue.get_oldest_arrival_time(), None);
-        let status = match queue_rx.try_recv() {
-            Ok(status) => status,
-            Err(e) => panic!("failed to receive COP queue status: {}", e),
-        };
-        assert_eq!(status.head_vs, vs as u32);
+        assert_eq!(status.head_vs, initial_vs as u32);
+        assert_eq!(status.status, CopQueueStatusPattern::Processing as i32);
 
         let cmd_ctx = create_cmd_ctx();
 
         queue.confirm(context.clone(), cmd_ctx.clone()).await;
 
-        let task_id = queue.push(context.clone(), cmd_ctx.clone()).await;
+        let task_num = 10;
 
-        assert_eq!(task_id, initial_id);
-        assert_eq!(queue.next_id(), initial_id + 1);
+        for i in 0..task_num {
+            let task_id = queue.push(context.clone(), cmd_ctx.clone()).await;
 
-        // ステータスが送信されているか確認
-        let status = match task_rx.try_recv() {
-            Ok(status) => status,
-            Err(e) => panic!("failed to receive COP status: {}", e),
-        };
-        assert_eq!(status.task_id, task_id);
-        assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
-        assert!(!status.is_confirm_command);
+            assert_eq!(task_id, initial_id + i);
+            assert_eq!(queue.next_id(), initial_id + i + 1);
 
-        // キューのステータスが更新されているか確認
-        let queue_status = match queue_rx.try_recv() {
-            Ok(status) => status,
-            Err(e) => panic!("failed to receive COP queue status: {}", e),
-        };
-        assert!(queue_status.pending.is_some());
-        let pending = queue_status.pending.unwrap();
-        assert_eq!(pending.head_id, Some(task_id));
-        assert_eq!(pending.task_count, 1);
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, task_id);
+            assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
+            assert!(!status.is_confirm_command);
+
+            // キューのステータスが更新されているか確認
+            let queue_status = match queue_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP queue status: {}", e),
+            };
+            assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+            let pending = queue_status.pending.unwrap();
+            assert_eq!(pending.head_id, Some(initial_id));
+            assert_eq!(pending.task_count, 1 + i);
+        }
 
         queue.confirm(context.clone(), cmd_ctx.clone()).await;
 
@@ -868,7 +836,7 @@ mod tests {
             Ok(status) => status,
             Err(e) => panic!("failed to receive COP status: {}", e),
         };
-        assert_eq!(status.task_id, task_id + 1);
+        assert_eq!(status.task_id, initial_id + task_num);
         assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
         assert!(status.is_confirm_command);
 
@@ -877,8 +845,153 @@ mod tests {
             Ok(status) => status,
             Err(e) => panic!("failed to receive COP queue status: {}", e),
         };
-        assert!(queue_status.pending.is_some());
         let pending = queue_status.pending.unwrap();
-        assert_eq!(pending.task_count, 2);
+        assert_eq!(pending.task_count, task_num + 1);
+
+        let task_num = 10;
+
+        for i in 0..task_num {
+            let (vs, _) = queue.execute(context.clone()).await.unwrap();
+            assert_eq!(vs, initial_vs + i as u8);
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+
+            assert_eq!(status.task_id, initial_id + i);
+            assert_eq!(status.status, CopTaskStatusPattern::Executed as i32);
+            assert!(!status.is_confirm_command);
+
+            // キューのステータスが更新されているか確認
+            let queue_status = match queue_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP queue status: {}", e),
+            };
+            assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+            let pending = queue_status.pending.unwrap();
+            assert_eq!(pending.head_id, Some(initial_id + 1 + i));
+            assert_eq!(pending.task_count, task_num - i);
+            let executed = queue_status.executed.unwrap();
+            assert_eq!(executed.head_id, Some(initial_id));
+            assert_eq!(executed.task_count, i + 1);
+        }
+
+        let accept_num = 3;
+        queue.accept(context.clone(), initial_vs + accept_num).await;
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+        let pending = queue_status.pending.unwrap();
+        assert_eq!(pending.task_count, task_num - task_num + 1);
+        let executed = queue_status.executed.unwrap();
+        assert_eq!(executed.task_count, task_num - accept_num as u32);
+        let rejected = queue_status.rejected.unwrap();
+        assert_eq!(rejected.task_count, 0);
+
+        for i in 0..accept_num {
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, initial_id + i as u32);
+            assert_eq!(status.status, CopTaskStatusPattern::Accepted as i32);
+            assert!(!status.is_confirm_command);
+        }
+
+        queue.reject(context.clone()).await;
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+        assert_eq!(queue_status.pending.unwrap().task_count, task_num - task_num + 1);
+        assert_eq!(queue_status.executed.unwrap().task_count, 0);
+        assert_eq!(queue_status.rejected.unwrap().task_count, task_num - accept_num as u32);
+
+        for i in 0..(task_num - accept_num as u32) {
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, initial_id + accept_num as u32 + i);
+            assert_eq!(status.status, CopTaskStatusPattern::Rejected as i32);
+            assert!(!status.is_confirm_command);
+        }
+
+        for i in 0..(task_num - accept_num as u32) {
+            let (vs, _) = queue.execute(context.clone()).await.unwrap();
+            assert_eq!(vs, initial_vs + accept_num + i as u8);
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, initial_id + accept_num as u32 + i);
+            assert_eq!(status.status, CopTaskStatusPattern::Executed as i32);
+            assert!(!status.is_confirm_command);
+
+            // キューのステータスが更新されているか確認
+            let queue_status = match queue_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP queue status: {}", e),
+            };
+            assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+            assert_eq!(queue_status.pending.unwrap().task_count, task_num - task_num + 1);
+            assert_eq!(queue_status.executed.unwrap().task_count, i + 1);
+            assert_eq!(queue_status.rejected.unwrap().task_count, task_num - accept_num as u32 - i - 1);
+        }
+
+        for _  in 0..3 {
+            let (vs, _) = queue.execute(context.clone()).await.unwrap();
+            assert_eq!(vs, initial_vs + task_num as u8);
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, initial_id + task_num);
+            assert_eq!(status.status, CopTaskStatusPattern::Executed as i32);
+            assert!(status.is_confirm_command);
+
+            // キューのステータスが更新されているか確認
+            let queue_status = match queue_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP queue status: {}", e),
+            };
+            assert_eq!(queue_status.status, CopQueueStatusPattern::Confirming as i32);
+            assert_eq!(queue_status.pending.unwrap().task_count, 0);
+            assert_eq!(queue_status.executed.unwrap().task_count, task_num - accept_num as u32);
+            assert_eq!(queue_status.rejected.unwrap().task_count, 0);
+        }
+
+        queue.reject(context.clone()).await;
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(queue_status.status, CopQueueStatusPattern::Processing as i32);
+        assert_eq!(queue_status.pending.unwrap().task_count, task_num - task_num + 1);
+        assert_eq!(queue_status.executed.unwrap().task_count, 0);
+        assert_eq!(queue_status.rejected.unwrap().task_count, task_num - accept_num as u32);
+
+        for i in 0..(task_num - accept_num as u32) {
+            // ステータスが送信されているか確認
+            let status = match task_rx.try_recv() {
+                Ok(status) => status,
+                Err(e) => panic!("failed to receive COP status: {}", e),
+            };
+            assert_eq!(status.task_id, initial_id + accept_num as u32 + i);
+            assert_eq!(status.status, CopTaskStatusPattern::Rejected as i32);
+            assert!(!status.is_confirm_command);
+        }
+
     }
 }
