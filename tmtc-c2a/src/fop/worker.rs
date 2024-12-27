@@ -2,7 +2,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use anyhow::{anyhow, Result};
 use axum::async_trait;
-use gaia_ccsds_c2a::{ccsds::tc::{self, clcw::CLCW}, ccsds_c2a::tc::{segment, space_packet}};
+use gaia_ccsds_c2a::{ccsds::tc, ccsds_c2a::tc::{segment, space_packet}};
 use gaia_tmtc::{cop::{cop_command, CopCommand, CopQueueStatusSet, CopTaskStatus, CopVsvr, CopWorkerStatus}, tco_tmiv::{Tco, Tmiv}, Handle};
 use prost_types::Timestamp;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -324,17 +324,10 @@ where
         };
         let state_machine_clone = state_machine.clone();
         let update_variable_task = async move {
-            let mut last_clcw_opt: Option<CLCW> = None;
             while let Some(clcw) = clcw_rx.recv().await {
                 let mut sm_locked = state_machine_clone.lock().await;
                 sm_locked.clcw_received().await;
-                if let Some(last_clcw) = &last_clcw_opt {
-                    if last_clcw.clone().into_bytes() == clcw.clone().into_bytes() {
-                        continue;
-                    } 
-                }
                 sm_locked.set_clcw(&clcw).await;
-                last_clcw_opt = Some(clcw);
             }
             Err(anyhow!("CLCW connection has gone"))
         };

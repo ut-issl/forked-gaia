@@ -106,7 +106,7 @@ impl CopTaskReceiver {
 }
 
 pub fn create_clcw_channel() -> (CLCWSender, CLCWReceiver) {
-    let (tx, rx) = broadcast::channel(16);
+    let (tx, rx) = broadcast::channel(1024);
     (CLCWSender { tx }, CLCWReceiver { rx })
 }
 

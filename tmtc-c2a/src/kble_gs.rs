@@ -15,7 +15,7 @@ use tracing::{error, info};
 
 pub fn new() -> (Link, Socket) {
     let (cmd_tx, cmd_rx) = mpsc::channel(1);
-    let (tlm_tx, _) = broadcast::channel(10);
+    let (tlm_tx, _) = broadcast::channel(1024);
     let link = Link {
         cmd_tx,
         tlm_tx: tlm_tx.clone(),

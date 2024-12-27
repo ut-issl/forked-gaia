@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use gaia_tmtc::{cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopQueueStatusPattern}, tco_tmiv::Tco};
 use prost_types::Timestamp;
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::satellite::CopTaskId;
 
@@ -38,7 +38,7 @@ type FopQueuePushOutput = (Box<dyn FopQueueStateNode>, CopTaskId);
 type FopQueueExecuteOutput = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>);
 
 trait FopQueueStateNode {
-    fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>>;
+    fn get_last_time(&self) -> Option<DateTime<Utc>>;
     fn next_id(&self) -> CopTaskId;
     fn push(self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopQueuePushOutput>>>;
     fn confirm(self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
@@ -70,9 +70,9 @@ impl FopQueueTask {
 
 struct ProcessingQueue {
     pending: VecDeque<(CopTaskId, FopQueueTask)>,
-    executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
-    rejected: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
-    oldest_arrival_time: Option<DateTime<Utc>>,
+    executed: VecDeque<(CopTaskId, CommandContext)>,
+    rejected: VecDeque<(CopTaskId, CommandContext)>,
+    last_time: Option<DateTime<Utc>>,
     next_id: CopTaskId,
     vs_at_id0: u32,
 }
@@ -86,7 +86,7 @@ impl ProcessingQueue {
             pending: VecDeque::new(),
             executed: VecDeque::new(),
             rejected: VecDeque::new(),
-            oldest_arrival_time: None,
+            last_time: None,
             next_id,
             vs_at_id0: vs.wrapping_sub(next_id as u8) as u32,
         }
@@ -108,7 +108,7 @@ impl ProcessingQueue {
             }
         };
         let (executed_vs, executed) = {
-            if let Some((head_id, ctx, _)) = self.executed.front() {
+            if let Some((head_id, ctx)) = self.executed.front() {
                 (
                     Some((head_id + self.vs_at_id0) as u8),
                     Some(CopQueueStatus {
@@ -122,7 +122,7 @@ impl ProcessingQueue {
             }
         };
         let (rejected_vs, rejected) = {
-            if let Some((head_id, ctx, _)) = self.rejected.front() {
+            if let Some((head_id, ctx)) = self.rejected.front() {
                 (
                     Some((head_id + self.vs_at_id0) as u8),
                     Some(CopQueueStatus {
@@ -135,15 +135,12 @@ impl ProcessingQueue {
                 (None, Some(CopQueueStatus::default()))
             }
         };
-        let oldest_arrival_time = self
-            .executed
-            .front()
-            .map(|(_, _, time)| *time)
-            .or_else(|| self.rejected.front().map(|(_, _, time)| *time));
-        self.oldest_arrival_time = oldest_arrival_time;
+        if self.pending.is_empty() && self.executed.is_empty() && self.rejected.is_empty() {
+            self.last_time = None;
+        }
         let vs_list = vec![pending_vs, executed_vs, rejected_vs];
         let head_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
-        let oldest_arrival_time = oldest_arrival_time.map(|time| Timestamp {
+        let oldest_arrival_time = self.last_time.map(|time| Timestamp {
             seconds: time.timestamp(),
             nanos: time.timestamp_subsec_nanos() as i32,
         });
@@ -169,13 +166,16 @@ impl ProcessingQueue {
 }
 
 impl FopQueueStateNode for ProcessingQueue {
-    fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>> {
-        self.oldest_arrival_time
+    fn get_last_time(&self) -> Option<DateTime<Utc>> {
+        self.last_time
     }
     fn next_id(&self) -> CopTaskId {
         self.next_id
     }
     fn push(mut self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, CopTaskId)>>> {
+        if self.last_time.is_none() {
+            self.last_time = Some(chrono::Utc::now());
+        }
         let id = self.next_id;
         self.next_id += 1;
         let id_tco = (id, cmd_ctx.tco.as_ref().clone());
@@ -215,13 +215,13 @@ impl FopQueueStateNode for ProcessingQueue {
         context: FopQueueContext,
     ) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
         Box::pin(async move {
-            let (id, ctx, time) = match self.rejected.pop_front() {
-                Some((id,ctx,time)) => (id,ctx, time),
+            let (id, ctx) = match self.rejected.pop_front() {
+                Some((id,ctx)) => (id,ctx),
                 None => match self.pending.pop_front() {
-                    Some((id, FopQueueTask::Process(ctx))) => (id, ctx, chrono::Utc::now().naive_utc().and_utc()),
+                    Some((id, FopQueueTask::Process(ctx))) => (id, ctx),
                     Some((id, FopQueueTask::Confirm(ctx))) => {
                         let pending = self.pending;
-                        let confirm = (id, ctx.clone(), chrono::Utc::now().naive_utc().and_utc());
+                        let confirm = (id, ctx.clone());
                         let status = CopTaskStatus::from_id_tco(
                             (id, ctx.tco.as_ref().clone()),
                             CopTaskStatusPattern::Executed,
@@ -234,7 +234,7 @@ impl FopQueueStateNode for ProcessingQueue {
                             pending,
                             confirm,
                             executed: self.executed,
-                            oldest_arrival_time: self.oldest_arrival_time,
+                            last_time: self.last_time,
                             next_id: self.next_id,
                             vs_at_id0: self.vs_at_id0,
                         });
@@ -248,7 +248,7 @@ impl FopQueueStateNode for ProcessingQueue {
                 },
             };
             let ret = ((id + self.vs_at_id0) as u8, ctx.clone());
-            self.executed.push_back((id, ctx.clone(), time));
+            self.executed.push_back((id, ctx.clone()));
             let status = CopTaskStatus::from_id_tco(
                 (id, ctx.tco.as_ref().clone()),
                 CopTaskStatusPattern::Executed,
@@ -268,8 +268,9 @@ impl FopQueueStateNode for ProcessingQueue {
         vr: u8,
     ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
         Box::pin(async move {
-            let accepted_num = if let Some((head_id, _, _)) = self.executed.front() {
+            let accepted_num = if let Some((head_id, _)) = self.executed.front() {
                 if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
+                    info!("length of executed: {} vs {}", self.executed.len(), vr.wrapping_sub((head_id + self.vs_at_id0) as u8));
                     0
                 } else {
                     vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
@@ -280,7 +281,10 @@ impl FopQueueStateNode for ProcessingQueue {
             let accepted = self
                 .executed
                 .drain(0..(accepted_num as usize))
-                .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+                .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
+            if accepted.len() != 0 {
+                self.last_time = Some(chrono::Utc::now());
+            }
             for id_tco in accepted {
                 if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                     id_tco,
@@ -304,7 +308,7 @@ impl FopQueueStateNode for ProcessingQueue {
             let (ret, mut moved): (Vec<_>, Vec<_>) = self
                 .executed
                 .drain(..)
-                .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
+                .map(|(id, ctx)| ((id, ctx.tco.as_ref().clone()), (id, ctx)))
                 .unzip();
             self.rejected = moved.drain(..).chain(stash).collect();
             for id_tco in ret.into_iter() {
@@ -331,8 +335,8 @@ impl FopQueueStateNode for ProcessingQueue {
                 .pending
                 .drain(..)
                 .map(|(id, task)| (id, task.context()))
-                .chain(self.executed.drain(..).map(|(id, ctx, _)| (id, ctx)))
-                .chain(self.rejected.drain(..).map(|(id, ctx, _)| (id, ctx)))
+                .chain(self.executed.drain(..))
+                .chain(self.rejected.drain(..))
                 .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
             for id_tco in canceled {
                 if let Err(e) = context.task_status_tx
@@ -349,9 +353,9 @@ impl FopQueueStateNode for ProcessingQueue {
 
 struct ConfirmingQueue {
     pending: VecDeque<(CopTaskId, FopQueueTask)>,
-    confirm: (CopTaskId, CommandContext, DateTime<Utc>),
-    executed: VecDeque<(CopTaskId, CommandContext, DateTime<Utc>)>,
-    oldest_arrival_time: Option<DateTime<Utc>>,
+    confirm: (CopTaskId, CommandContext),
+    executed: VecDeque<(CopTaskId, CommandContext)>,
+    last_time: Option<DateTime<Utc>>,
     next_id: CopTaskId,
     vs_at_id0: u32,
 }
@@ -374,7 +378,7 @@ impl ConfirmingQueue {
             }
         };
         let (executed_vs, executed) = {
-            if let Some((head_id, ctx, _)) = self.executed.front() {
+            if let Some((head_id, ctx)) = self.executed.front() {
                 (
                     Some((head_id + self.vs_at_id0) as u8),
                     Some(CopQueueStatus {
@@ -387,15 +391,9 @@ impl ConfirmingQueue {
                 (None, Some(CopQueueStatus::default()))
             }
         };
-        let oldest_arrival_time = self
-            .executed
-            .front()
-            .map(|(_, _, time)| *time)
-            .or(Some(self.confirm.2));
-        self.oldest_arrival_time = oldest_arrival_time;
         let vs_list = vec![pending_vs, executed_vs];
         let head_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
-        let oldest_arrival_time = oldest_arrival_time.map(|time| Timestamp {
+        let oldest_arrival_time = self.last_time.map(|time| Timestamp {
             seconds: time.timestamp(),
             nanos: time.timestamp_subsec_nanos() as i32,
         });
@@ -421,8 +419,8 @@ impl ConfirmingQueue {
 }
 
 impl FopQueueStateNode for ConfirmingQueue {
-    fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>> {
-        self.oldest_arrival_time
+    fn get_last_time(&self) -> Option<DateTime<Utc>> {
+        self.last_time
     }
     fn next_id(&self) -> CopTaskId {
         self.next_id
@@ -465,7 +463,7 @@ impl FopQueueStateNode for ConfirmingQueue {
     fn execute(mut self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
         Box::pin(async move {
             let (id, ctx) = {
-                let (id, ctx, _) = self.confirm.clone();
+                let (id, ctx) = self.confirm.clone();
                 let status = CopTaskStatus::from_id_tco(
                     (id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Executed,
@@ -482,14 +480,19 @@ impl FopQueueStateNode for ConfirmingQueue {
     }
     fn accept(mut self: Box<Self>, context: FopQueueContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
         Box::pin(async move{
-            if let Some((head_id, _, _)) = self.executed.front() {
+            if let Some((head_id, _)) = self.executed.front() {
                 if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > (self.executed.len() + 1) as u8 {
+                    info!("length of executed: {} vs {}", self.executed.len(), vr.wrapping_sub((head_id + self.vs_at_id0) as u8));
                     self
                 } else if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
                     let accepted = self
                         .executed
                         .drain(..)
-                        .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+                        .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
+                    if accepted.len() != 0 {
+                        self.last_time = Some(chrono::Utc::now());
+                    }
+                    self.last_time = Some(chrono::Utc::now());
                     for id_tco in accepted {
                         if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                             id_tco,
@@ -499,7 +502,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                             error!("failed to send COP status: {}", e);
                         }
                     }
-                    let (id, ctx, _) = self.confirm.clone();
+                    let (id, ctx) = self.confirm.clone();
                     let status = CopTaskStatus::from_id_tco(
                         (id, ctx.tco.as_ref().clone()),
                         CopTaskStatusPattern::Accepted,
@@ -512,7 +515,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                         pending: self.pending,
                         executed: self.executed,
                         rejected: VecDeque::new(),
-                        oldest_arrival_time: self.oldest_arrival_time,
+                        last_time: self.last_time,
                         next_id: self.next_id,
                         vs_at_id0: self.vs_at_id0,
                     });
@@ -523,7 +526,10 @@ impl FopQueueStateNode for ConfirmingQueue {
                     let accepted = self
                         .executed
                         .drain(0..(accepted_num as usize))
-                        .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+                        .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
+                    if accepted.len() != 0 {
+                        self.last_time = Some(chrono::Utc::now());
+                    }
                     for id_tco in accepted {
                         if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
                             id_tco,
@@ -537,7 +543,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                     self as Box<dyn FopQueueStateNode>
                 }
             } else {
-                let (head_id, ctx, _) = self.confirm.clone();
+                let (head_id, ctx) = self.confirm.clone();
                 if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 
                 || vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
                     self
@@ -547,6 +553,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                         CopTaskStatusPattern::Executed,
                         true,
                     );
+                    self.last_time = Some(chrono::Utc::now());
                     if let Err(e) = context.task_status_tx.send(status).await {
                         error!("failed to send COP status: {}", e);
                     }
@@ -554,7 +561,7 @@ impl FopQueueStateNode for ConfirmingQueue {
                         pending: self.pending,
                         executed: self.executed,
                         rejected: VecDeque::new(),
-                        oldest_arrival_time: self.oldest_arrival_time,
+                        last_time: self.last_time,
                         next_id: self.next_id,
                         vs_at_id0: self.vs_at_id0,
                     });
@@ -573,7 +580,7 @@ impl FopQueueStateNode for ConfirmingQueue {
             let (ret, mut moved): (Vec<_>, Vec<_>) = self
                 .executed
                 .drain(..)
-                .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
+                .map(|(id, ctx)| ((id, ctx.tco.as_ref().clone()), (id, ctx)))
                 .unzip();
             let rejected = moved.drain(..).collect();
             for id_tco in ret.into_iter() {
@@ -585,13 +592,13 @@ impl FopQueueStateNode for ConfirmingQueue {
                     error!("failed to send COP status: {}", e);
                 }
             }
-            let (confirm_id, confirm_ctx, _) = self.confirm.clone();
+            let (confirm_id, confirm_ctx) = self.confirm.clone();
             self.pending.push_front((confirm_id, FopQueueTask::Confirm(confirm_ctx)));
             let mut ret = Box::new(ProcessingQueue {
                 pending: self.pending,
                 executed: VecDeque::new(),
                 rejected,
-                oldest_arrival_time: self.oldest_arrival_time,
+                last_time: self.last_time,
                 next_id: self.next_id,
                 vs_at_id0: self.vs_at_id0,
             });
@@ -606,7 +613,7 @@ impl FopQueueStateNode for ConfirmingQueue {
         status_pattern: CopTaskStatusPattern
     ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
         Box::pin(async move {
-            let canceled = self.executed.drain(..).map(|(id, ctx, _)| (id, ctx))
+            let canceled = self.executed.drain(..)
                 .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
             for id_tco in canceled {
                 if let Err(e) = context.task_status_tx
@@ -637,9 +644,9 @@ impl FopQueue {
             inner: Some(Box::new(ProcessingQueue::new(vs, next_id))),
         }
     }
-    pub fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>> {
+    pub fn get_last_time(&self) -> Option<DateTime<Utc>> {
         match &self.inner {
-            Some(inner) => inner.get_oldest_arrival_time(),
+            Some(inner) => inner.get_last_time(),
             None => unreachable!("FopQueue is empty"),
         }
     }
@@ -774,7 +781,7 @@ mod tests {
         let queue = FopQueue::new(vs, initial_id, ctx.clone()).await;
         
         assert_eq!(queue.next_id(), initial_id);
-        assert_eq!(queue.get_oldest_arrival_time(), None);
+        assert_eq!(queue.get_last_time(), None);
         let status = match queue_rx.try_recv() {
             Ok(status) => status,
             Err(e) => panic!("failed to receive COP queue status: {}", e),
@@ -789,7 +796,7 @@ mod tests {
         let initial_vs = 10;
         let mut queue = FopQueue::new(initial_vs, initial_id, context.clone()).await;
         assert_eq!(queue.next_id(), initial_id);
-        assert_eq!(queue.get_oldest_arrival_time(), None);
+        assert_eq!(queue.get_last_time(), None);
         let status = match queue_rx.try_recv() {
             Ok(status) => status,
             Err(e) => panic!("failed to receive COP queue status: {}", e),

@@ -736,7 +736,7 @@ impl FopStateNode for FopStateActive {
     fn evaluate_timeout(mut self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async move{ 
             let now = chrono::Utc::now();
-            let oldest_arrival_time = match self.queue.get_oldest_arrival_time() {
+            let oldest_arrival_time = match self.queue.get_last_time() {
                 Some(time) => time,
                 None => return self as Box<dyn FopStateNode>,
             };

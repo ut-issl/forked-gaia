@@ -85,7 +85,7 @@ impl CopStatusStore {
         let id = status.task_id;
         let pattern = status.status();
         match pattern {
-            CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled => {
+            CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled | CopTaskStatusPattern::Failed | CopTaskStatusPattern::Lockout | CopTaskStatusPattern::Timeout => {
                 let pop_item = {
                     let mut completed = self.completed.write().await;
                     if completed.len() == self.capacity {
