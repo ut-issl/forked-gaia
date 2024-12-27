@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use gaia_ccsds_c2a::ccsds::tc::{self, clcw::CLCW, sync_and_channel_coding::FrameType};
 use gaia_tmtc::cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern, CopQueueStatusPattern};
 use prost_types::Timestamp;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::satellite::CopTaskId;
@@ -46,42 +46,45 @@ impl FopStateNodeError {
     }
 }
 
+type FopStateNodeResult = Result<Box<dyn FopStateNode>, FopStateNodeError>;
+type FopTaskAppendResult = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>;
+
 trait FopStateNode: Display {
-    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode>;
+    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 
-    fn clcw_received(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode>;
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode>;
-    fn vsvr_matched(self: Box<Self>, context: FopStateContext, vr: u8) -> Box<dyn FopStateNode>;
-    fn accept (&mut self, context: FopStateContext, vr: u8);
-    fn reject (&mut self, context: FopStateContext);
+    fn clcw_received(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
+    fn vsvr_matched(self: Box<Self>, context: FopStateContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
+    fn accept (self: Box<Self>, context: FopStateContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
+    fn reject (self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 
-    fn terminate(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError>;
-    fn start_unlocking(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError>;
-    fn start_initializing(self: Box<Self>, context: FopStateContext, vsvr: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError>;
-    fn auto_retransmit_enable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError>;
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError>;
+    fn terminate(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
+    fn start_unlocking(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
+    fn start_initializing(self: Box<Self>, context: FopStateContext, vsvr: u8) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
+    fn auto_retransmit_enable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
     fn send_set_vr_command(&mut self, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>, vr: u8) -> Pin<Box<dyn Future<Output = Result<()>>>>;
     fn send_unlock_command(&self, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync + 'static>) -> Pin<Box<dyn Future<Output = Result<()>>>>;
-    fn break_point_confirm(&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<()>;
+    fn break_point_confirm(self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
 
     fn execute (self: Box<Self>, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 
-    fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>>;
+    fn append (self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopTaskAppendResult>>>;
     fn get_next_id(&self) -> Option<CopTaskId>;
 }
 
 #[derive(Clone)]
 pub struct FopStateContext {
-    worker_state_tx: broadcast::Sender<CopWorkerStatus>,
-    queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
-    task_status_tx: broadcast::Sender<CopTaskStatus>,
+    worker_state_tx: mpsc::Sender<CopWorkerStatus>,
+    queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
+    task_status_tx: mpsc::Sender<CopTaskStatus>,
     timeout_sec: u32,
     next_id: CopTaskId,
     tc_scid: u16,
 }
 
 impl FopStateContext {
-    pub fn send_worker_status(&self, status: CopWorkerStatusPattern) {
+    pub async fn send_worker_status(&self, status: CopWorkerStatusPattern) {
         let now = chrono::Utc::now().naive_utc();
         let timestamp = Timestamp {
             seconds: now.and_utc().timestamp(),
@@ -91,7 +94,7 @@ impl FopStateContext {
             state: status.into(),
             timeout_sec: self.timeout_sec.into(),
             timestamp: Some(timestamp),
-        }) {
+        }).await {
             error!("failed to send FOP state: {}", e);
         }
     }
@@ -112,52 +115,68 @@ impl Display for FopStateIdle {
 }
 
 impl FopStateNode for FopStateIdle {
-    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{ self as Box<dyn FopStateNode> })
     }  
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-            Box::new(FopStateLockout) as Box<dyn FopStateNode> 
-        } else {
-            self as Box<dyn FopStateNode> 
-        }
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+                Box::new(FopStateLockout) as Box<dyn FopStateNode> 
+            } else {
+                self as Box<dyn FopStateNode> 
+            }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
 
-    fn terminate(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "cancel is not allowed in idle state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn terminate(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "cancel is not allowed in idle state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in idle state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in idle state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(self: Box<Self>, context: FopStateContext, vsvr: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerInitialize);
-        Ok(Box::new(FopStateInitialize::new(vsvr)) as Box<dyn FopStateNode>)
+    fn start_initializing(self: Box<Self>, context: FopStateContext, vsvr: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerInitialize).await;
+            Ok(Box::new(FopStateInitialize::new(vsvr)) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in idle state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in idle state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in idle state")) })
@@ -165,12 +184,22 @@ impl FopStateNode for FopStateIdle {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in idle state")) })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in idle state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in idle state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
-        Err(anyhow!("append is not allowed in idle state")) 
+    fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>,Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "append is not allowed in idle state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn execute (self: Box<Self>, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async { self as Box<dyn FopStateNode> })
@@ -189,52 +218,68 @@ impl Display for FopStateLockout {
 }
 
 impl FopStateNode for FopStateLockout {
-    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode> 
-    }
+    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{ self as Box<dyn FopStateNode> })
+    }  
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            self as Box<dyn FopStateNode>
-        } else {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle);
-            Box::new(FopStateIdle) as Box<dyn FopStateNode> 
-        }
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                self as Box<dyn FopStateNode>
+            } else {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
+                Box::new(FopStateIdle) as Box<dyn FopStateNode> 
+            }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
     
-    fn terminate(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "cancel is not allowed in lockout state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn terminate(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "cancel is not allowed in lockout state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_unlocking(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerUnlocking);
-        Ok(Box::new(FopStateUnlocking::new()) as Box<dyn FopStateNode>)
+    fn start_unlocking(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerUnlocking).await;
+            Ok(Box::new(FopStateUnlocking::new()) as Box<dyn FopStateNode>)
+        })
     }
-    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_initializing is not allowed in lockout state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "start_initializing is not allowed in lockout state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in lockout state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in lockout state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in lockout state")) })
@@ -242,12 +287,22 @@ impl FopStateNode for FopStateLockout {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in lockout state")) })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in lockout state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in lockout state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
-        Err(anyhow!("append is not allowed in lockout state"))
+    fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option <CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "append is not allowed in lockout state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn execute (self: Box<Self>, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async { self as Box<dyn FopStateNode> })
@@ -276,66 +331,82 @@ impl Display for FopStateUnlocking {
 }
 
 impl FopStateNode for FopStateUnlocking {
-    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
-        let now = chrono::Utc::now();
-        if now - self.start_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) {
-            tokio::spawn(async move { 
-                context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout);
-                tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
-                context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-            });
-            Box::new(FopStateLockout) as Box<dyn FopStateNode> 
-        } else {
-            self as Box<dyn FopStateNode>
-        }
+    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{
+            let now = chrono::Utc::now();
+            if now - self.start_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) {
+                tokio::spawn(async move { 
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout).await;
+                    tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+                });
+                Box::new(FopStateLockout) as Box<dyn FopStateNode> 
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
     }
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            self as Box<dyn FopStateNode>
-        } else {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle);
-            Box::new(FopStateIdle) as Box<dyn FopStateNode>
-        }
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                self as Box<dyn FopStateNode>
+            } else {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
+                Box::new(FopStateIdle) as Box<dyn FopStateNode>
+            }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
 
-    fn terminate(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        tokio::spawn(async move {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
+    fn terminate(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled).await;
             tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
-            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-        });
-        Ok(Box::new(FopStateLockout) as Box<dyn FopStateNode>) 
+            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+            Ok(Box::new(FopStateLockout) as Box<dyn FopStateNode>) 
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in unlocking state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in unlocking state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_initializing is not allowed in unlocking state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_initializing is not allowed in unlocking state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in unlocking state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in unlocking state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in unlocking state")) })
@@ -343,12 +414,22 @@ impl FopStateNode for FopStateUnlocking {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in unlocking state")) })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in unlocking state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in unlocking state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
-       Err(anyhow!("append is not allowed in unlocking state"))
+    fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "append is not allowed in unlocking state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
     fn execute(self: Box<Self>, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync + 'static>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
@@ -361,9 +442,9 @@ impl FopStateNode for FopStateUnlocking {
                 Ok(_) => self as Box<dyn FopStateNode>,
                 Err(e) => {
                     error!("failed to send unlock command: {}", e);
-                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed);
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed).await;
                     tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
-                    context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
                     Box::new(FopStateLockout) as Box<dyn FopStateNode>
                 }
             } 
@@ -383,57 +464,77 @@ impl Display for FopStateClcwUnreceived {
 }
 
 impl FopStateNode for FopStateClcwUnreceived {
-    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
-    }
+    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{ self as Box<dyn FopStateNode> })
+    }  
 
-    fn clcw_received(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerIdle);
-        Box::new(FopStateIdle) as Box<dyn FopStateNode>
-    }
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-            Box::new(FopStateLockout) as Box<dyn FopStateNode>
-        } else {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle);
+    fn clcw_received(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
             Box::new(FopStateIdle) as Box<dyn FopStateNode>
-        }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, context: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerIdle);
-        Box::new(FopStateIdle) as Box<dyn FopStateNode>
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+                Box::new(FopStateLockout) as Box<dyn FopStateNode>
+            } else {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
+                Box::new(FopStateIdle) as Box<dyn FopStateNode>
+            }
+        })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn vsvr_matched(self: Box<Self>, context: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
+            Box::new(FopStateIdle) as Box<dyn FopStateNode>
+        })
+    }
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
 
-    fn terminate(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "cancel is not allowed in clcw_unreceived state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn terminate(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "cancel is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in clcw_unreceived state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_initializing is not allowed in clcw_unreceived state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "start_initializing is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in clcw_unreceived state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in clcw_unreceived state")) })
@@ -441,12 +542,22 @@ impl FopStateNode for FopStateClcwUnreceived {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in clcw_unreceived state")) })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in clcw_unreceived state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
-        Err(anyhow!("append is not allowed in clcw_unreceived state"))
+    fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "append is not allowed in clcw_unreceived state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
     fn execute (self: Box<Self>, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
@@ -478,63 +589,83 @@ impl Display for FopStateInitialize {
 }
 
 impl FopStateNode for FopStateInitialize {
-    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
-        let now = chrono::Utc::now();
-        if now - self.start_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout);
-            Box::new(FopStateIdle) as Box<dyn FopStateNode>
-        } else {
-            self as Box<dyn FopStateNode>
-        }
+    fn evaluate_timeout(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{
+            let now = chrono::Utc::now();
+            if now - self.start_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout).await;
+                Box::new(FopStateIdle) as Box<dyn FopStateNode>
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
     }
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-            Box::new(FopStateLockout) as Box<dyn FopStateNode>
-        } else {
-            self as Box<dyn FopStateNode>
-        }
+    fn lockout(self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+                Box::new(FopStateLockout) as Box<dyn FopStateNode>
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, context: FopStateContext, vr: u8) -> Box<dyn FopStateNode> {
-        if vr == self.vsvr {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerActive);
-            Box::new(FopStateActive::new(self.vsvr, context.next_id, context.get_queue_context())) as Box<dyn FopStateNode>
-        } else {
-            self as Box<dyn FopStateNode>
-        }
+    fn vsvr_matched(self: Box<Self>, context: FopStateContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if vr == self.vsvr {
+                context.send_worker_status(CopWorkerStatusPattern::WorkerActive).await;
+                Box::new(FopStateActive::new(self.vsvr, context.next_id, context.get_queue_context()).await) as Box<dyn FopStateNode>
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
 
-    fn terminate(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
-        Ok(Box::new(FopStateIdle) as Box<dyn FopStateNode>)
+    fn terminate(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled).await;
+            Ok(Box::new(FopStateIdle) as Box<dyn FopStateNode>)
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in initialize state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in initialize state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_initializing is not allowed in initialize state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            Err(FopStateNodeError::new(
+                "start_initializing is not allowed in initialize state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in initialize state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in initialize state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>>{
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >,  _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in initialize state")) })
@@ -542,12 +673,22 @@ impl FopStateNode for FopStateInitialize {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in initialize state")) })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in initialize state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in initialize state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, _: FopStateContext, _: CommandContext) -> Result<Option<CopTaskId>> {
-        Err(anyhow!("append is not allowed in initialize state"))
+    fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "append is not allowed in initialize state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
     fn execute (self: Box<Self>, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
@@ -562,7 +703,7 @@ impl FopStateNode for FopStateInitialize {
                 }
                 Err(e) => {
                     error!("failed to send set_vr command: {}", e);
-                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed);
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed).await;
                     Box::new(FopStateIdle) as Box<dyn FopStateNode>
                 }
             }
@@ -578,9 +719,9 @@ struct FopStateActive{
 }
 
 impl FopStateActive {
-    fn new(vs: u8, next_id: CopTaskId, ctx: FopQueueContext) -> Self {
+    async fn new(vs: u8, next_id: CopTaskId, ctx: FopQueueContext) -> Self {
         Self {
-            queue: FopQueue::new(vs, next_id, ctx),
+            queue: FopQueue::new(vs, next_id, ctx).await,
         }
     }
 }
@@ -592,73 +733,91 @@ impl Display for FopStateActive {
 }
 
 impl FopStateNode for FopStateActive {
-    fn evaluate_timeout(mut self: Box<Self>, context: FopStateContext) -> Box<dyn FopStateNode> {
-        let now = chrono::Utc::now();
-        let oldest_arrival_time = match self.queue.get_oldest_arrival_time() {
-            Some(time) => time,
-            None => return self as Box<dyn FopStateNode>,
-        };
-        if now - oldest_arrival_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) { 
-            context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout);
-            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Timeout);
-            Box::new(FopStateIdle) as Box<dyn FopStateNode> 
-        } else {
-            self as Box<dyn FopStateNode>
-        }
+    fn evaluate_timeout(mut self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move{ 
+            let now = chrono::Utc::now();
+            let oldest_arrival_time = match self.queue.get_oldest_arrival_time() {
+                Some(time) => time,
+                None => return self as Box<dyn FopStateNode>,
+            };
+            if now - oldest_arrival_time > chrono::TimeDelta::seconds(context.timeout_sec as i64) { 
+                context.send_worker_status(CopWorkerStatusPattern::WorkerTimeout).await;
+                self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Timeout).await;
+                Box::new(FopStateIdle) as Box<dyn FopStateNode> 
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
     }
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(mut self: Box<Self>, context: FopStateContext, flag: bool) -> Box<dyn FopStateNode> {
-        if flag {
-            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Lockout);
-            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout);
-            Box::new(FopStateLockout) as Box<dyn FopStateNode>
-        } else {
+    fn lockout(mut self: Box<Self>, context: FopStateContext, flag: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if flag {
+                self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Lockout).await;
+                context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+                Box::new(FopStateLockout) as Box<dyn FopStateNode>
+            } else {
+                self as Box<dyn FopStateNode>
+            }
+        })
+    }
+    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn accept (mut self: Box<Self>, context: FopStateContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            self.queue.accept(context.get_queue_context(), vr).await;
             self as Box<dyn FopStateNode>
-        }
+        })
     }
-    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
-    }
-    fn accept (&mut self, context: FopStateContext, vr: u8) {
-        self.queue.accept(context.get_queue_context(), vr);
-    }
-    fn reject (&mut self, context: FopStateContext) {
-        self.queue.reject(context.get_queue_context());
+    fn reject (mut self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            self.queue.reject(context.get_queue_context()).await;
+            self as Box<dyn FopStateNode>
+        })
     }
 
-    fn terminate(mut self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
-        context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
-        Ok(Box::new(FopStateIdle) as Box<dyn FopStateNode>)
+    fn terminate(mut self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled).await;
+            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled).await;
+            Ok(Box::new(FopStateIdle) as Box<dyn FopStateNode>)
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in active state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in active state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(mut self: Box<Self>, context: FopStateContext, vsvr: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
-        tokio::spawn(async move {
-            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled);
+    fn start_initializing(mut self: Box<Self>, context: FopStateContext, vsvr: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled).await;
+            context.send_worker_status(CopWorkerStatusPattern::WorkerCanceled).await;
             tokio::time::sleep(tokio::time::Duration::from_nanos(1)).await;
-            context.send_worker_status(CopWorkerStatusPattern::WorkerInitialize);
-        });
-        Ok(Box::new(FopStateInitialize::new(vsvr)) as Box<dyn FopStateNode>)
+            context.send_worker_status(CopWorkerStatusPattern::WorkerInitialize).await;
+            Ok(Box::new(FopStateInitialize::new(vsvr)) as Box<dyn FopStateNode>)
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_enable is not allowed in active state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_enable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_enable is not allowed in active state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_disable(mut self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled);
-        context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff);
-        Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+    fn auto_retransmit_disable(mut self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            self.queue.clear(context.get_queue_context(), CopTaskStatusPattern::Canceled).await;
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            Ok(Box::new(FopStateAutoRetransmitOff::new()) as Box<dyn FopStateNode>)
+        })
     }
     fn send_set_vr_command(&mut self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>, _: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_set_vr_command is not allowed in active state")) })
@@ -666,19 +825,27 @@ impl FopStateNode for FopStateActive {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in active state")) })
     }
-    fn break_point_confirm(&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<()> {
-        self.queue.confirm(context.get_queue_context(), cmd_ctx);
-        Ok(())
+    fn break_point_confirm(mut self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            self.queue.confirm(context.get_queue_context(), cmd_ctx).await;
+            Ok(self as Box<dyn FopStateNode>)
+        })
     }
 
-    fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>> {
-        let queue_ctx = context.get_queue_context();
-        Ok(Some(self.queue.push(queue_ctx, cmd_ctx)))
+    fn append (mut self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async move {
+            let queue_ctx = context.get_queue_context();
+            let ret = self.queue.push(queue_ctx, cmd_ctx).await;
+            Ok((
+                self as Box<dyn FopStateNode>,
+                Some(ret)
+            ))
+        })
     }
 
     fn execute (mut self: Box<Self>, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async move {
-            let (vs, ctx) = match self.queue.execute(context.get_queue_context()) {
+            let (vs, ctx) = match self.queue.execute(context.get_queue_context()).await {
                 Some((vs, ctx)) => (vs, ctx),
                 None => return self as Box<dyn FopStateNode>,
             };
@@ -686,7 +853,7 @@ impl FopStateNode for FopStateActive {
                 Ok(_) => self as Box<dyn FopStateNode>,
                 Err(e) => {
                     error!("failed to transmit COP: {}", e);
-                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed);
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed).await;
                     Box::new(FopStateIdle) as Box<dyn FopStateNode>
                 }
             }
@@ -717,55 +884,91 @@ impl Display for FopStateAutoRetransmitOff {
     }
 }
 
+fn create_queue_status(vs: u8) -> CopQueueStatusSet {
+    let now = chrono::Utc::now().naive_utc();
+    let timestamp = Some(Timestamp {
+        seconds: now.and_utc().timestamp(),
+        nanos: now.and_utc().timestamp_subsec_nanos() as i32,
+    });
+    CopQueueStatusSet {
+        pending: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+        executed: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+        rejected: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
+        head_vs: vs as u32,
+        vs_at_id0: 0,
+        oldest_arrival_time: None,
+        timestamp,
+        status: CopQueueStatusPattern::Processing.into(),
+    }
+}
+
 impl FopStateNode for FopStateAutoRetransmitOff {
-    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn evaluate_timeout(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
 
-    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn clcw_received(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn lockout(self: Box<Self>, _: FopStateContext, _: bool) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn lockout(self: Box<Self>, _: FopStateContext, _: bool) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Box<dyn FopStateNode> {
-        self as Box<dyn FopStateNode>
+    fn vsvr_matched(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
     }
-    fn accept (&mut self, _: FopStateContext, _: u8) {}
-    fn reject (&mut self, _: FopStateContext) {}
+    fn accept (self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
+    fn reject (self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async { self as Box<dyn FopStateNode> })
+    }
 
-    fn terminate(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "cancel is not allowed in auto_retransmit_off state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn terminate(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "cancel is not allowed in auto_retransmit_off state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_unlocking is not allowed in auto_retransmit_off state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_unlocking(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "start_unlocking is not allowed in auto_retransmit_off state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "start_initializing is not allowed in auto_retransmit_off state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn start_initializing(self: Box<Self>, _: FopStateContext, _: u8) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "start_initializing is not allowed in auto_retransmit_off state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
-    fn auto_retransmit_enable(self: Box<Self>, context: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError>{
-        context.send_worker_status(CopWorkerStatusPattern::WorkerClcwUnreceived);
-        Ok(Box::new(FopStateClcwUnreceived) as Box<dyn FopStateNode>)
+    fn auto_retransmit_enable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerClcwUnreceived).await;
+            Ok(Box::new(FopStateClcwUnreceived) as Box<dyn FopStateNode>)
+        })
+        
     }
-    fn auto_retransmit_disable(self: Box<Self>, _: FopStateContext) -> Result<Box<dyn FopStateNode>, FopStateNodeError> {
-        Err(FopStateNodeError::new(
-            "auto_retransmit_disable is not allowed in auto_retransmit_off state",
-            self as Box<dyn FopStateNode>,
-        ))
+    fn auto_retransmit_disable(self: Box<Self>, _: FopStateContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "auto_retransmit_disable is not allowed in auto_retransmit_off state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
     fn send_set_vr_command(&mut self, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>, vsvr: u8) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         self.next_vs = vsvr;
         self.queue.drain(..);
         Box::pin(async move { 
+            if let Err(e) = context.queue_status_tx.send(create_queue_status(vsvr)).await {
+                error!("failed to send queue status: {}", e);
+            }
             if let Err(e) = send_type_bc(
                 sync_and_channel_coding.as_mut(),
                 context.tc_scid,
@@ -792,32 +995,21 @@ impl FopStateNode for FopStateAutoRetransmitOff {
             }
         })
     }
-    fn break_point_confirm(&mut self, _: FopStateContext, _: CommandContext) -> Result<()> {
-        Err(anyhow!("break_point_confirm is not allowed in auto_retransmit_off state"))
+    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
+        Box::pin(async {
+            Err(FopStateNodeError::new(
+                "break_point_confirm is not allowed in auto_retransmit_off state",
+                self as Box<dyn FopStateNode>,
+            ))
+        })
     }
 
-    fn append (&mut self, context: FopStateContext, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>> {
-        self.queue.push_back((self.next_vs, cmd_ctx));
-        let vs = self.next_vs;
-        self.next_vs = self.next_vs.wrapping_add(1);
-        let now = chrono::Utc::now().naive_utc();
-        let timestamp = Some(Timestamp {
-            seconds: now.and_utc().timestamp(),
-            nanos: now.and_utc().timestamp_subsec_nanos() as i32,
-        });
-        context.queue_status_tx.send(
-            CopQueueStatusSet {
-                pending: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                executed: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                rejected: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                head_vs: vs as u32,
-                vs_at_id0: 0,
-                oldest_arrival_time: None,
-                timestamp,
-                status: CopQueueStatusPattern::Processing.into(),
-            }
-        )?;
-        Ok(None)
+    fn append (mut self: Box<Self>, _: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>,Option<CopTaskId>), FopStateNodeError>>>> {
+        Box::pin(async move {
+            self.queue.push_back((self.next_vs, cmd_ctx));
+            self.next_vs = self.next_vs.wrapping_add(1);
+            Ok((self as Box<dyn FopStateNode>, None))
+        })
     }
     fn execute (mut self: Box<Self>, context: FopStateContext, mut sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync + 'static>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
         Box::pin(async move {
@@ -825,30 +1017,14 @@ impl FopStateNode for FopStateAutoRetransmitOff {
                 Some((vs, ctx)) => (vs, ctx),
                 None => return self as Box<dyn FopStateNode>,
             };
-            let now = chrono::Utc::now().naive_utc();
-            let timestamp = Some(Timestamp {
-                seconds: now.and_utc().timestamp(),
-                nanos: now.and_utc().timestamp_subsec_nanos() as i32,
-            });
-            if let Err(e) = context.queue_status_tx.send(
-                CopQueueStatusSet {
-                    pending: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                    executed: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                    rejected: Some(CopQueueStatus { head_id: None, head_tco_name: None, task_count: 0 }),
-                    head_vs: vs as u32,
-                    vs_at_id0: 0,
-                    oldest_arrival_time: None,
-                    timestamp,
-                    status: CopQueueStatusPattern::Processing.into(),
-                }
-            ) {
+            if let Err(e) = context.queue_status_tx.send(create_queue_status(vs.wrapping_add(1))).await {
                 error!("failed to send queue status: {}", e);
             }
             match ctx.transmit_to(sync_and_channel_coding.as_mut(), Some(vs)).await {
                 Ok(_) => self as Box<dyn FopStateNode>,
                 Err(e) => {
                     error!("failed to transmit COP: {}", e);
-                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed);
+                    context.send_worker_status(CopWorkerStatusPattern::WorkerFailed).await;
                     Box::new(FopStateIdle) as Box<dyn FopStateNode>
                 }
             }
@@ -867,9 +1043,9 @@ where
     timeout_sec: u32,
     tc_scid: u16,
     next_id: CopTaskId,
-    worker_state_tx: broadcast::Sender<CopWorkerStatus>,
-    queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
-    task_status_tx: broadcast::Sender<CopTaskStatus>,
+    worker_state_tx: mpsc::Sender<CopWorkerStatus>,
+    queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
+    task_status_tx: mpsc::Sender<CopTaskStatus>,
     sync_and_channel_coding: T,
 }
 
@@ -878,9 +1054,9 @@ where
     T: tc::SyncAndChannelCoding + Clone + Send + Sync + 'static,
 {
     pub fn new(
-        worker_state_tx: broadcast::Sender<CopWorkerStatus>,
-        queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
-        task_status_tx: broadcast::Sender<CopTaskStatus>,
+        worker_state_tx: mpsc::Sender<CopWorkerStatus>,
+        queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
+        task_status_tx: mpsc::Sender<CopTaskStatus>,
         sync_and_channel_coding: T,
         tc_scid: u16,
     ) -> Self {
@@ -906,68 +1082,45 @@ where
         }
     }
 
-    pub fn evaluate_timeout(&mut self) {
+    pub async fn evaluate_timeout(&mut self) {
         let context = self.get_context();
         self.inner = match self.inner.take(){
-            Some(state) => Some(state.evaluate_timeout(context)),
+            Some(state) => Some(state.evaluate_timeout(context).await),
             None => unreachable!(),
         };
     }
-    pub fn clcw_received(&mut self) {
+    pub async fn clcw_received(&mut self) {
         let context = self.get_context();
         self.inner = match self.inner.take(){
-            Some(state) => Some(state.clcw_received(context)),
+            Some(state) => Some(state.clcw_received(context).await),
             None => unreachable!(),
         };
     }
-    pub fn set_clcw(&mut self, clcw: &CLCW) {
+    pub async fn set_clcw(&mut self, clcw: &CLCW) {
         let context = self.get_context();
         self.inner = match self.inner.take(){
-            Some(state) => Some(state.vsvr_matched(context.clone(), clcw.report_value())),
+            Some(state) => Some(state.vsvr_matched(context.clone(), clcw.report_value()).await),
             None => unreachable!(),
         };
         if clcw.retransmit() == 1 {
             self.inner = match self.inner.take(){
-                Some(mut state) => {
-                    state.reject(context.clone());
-                    Some(state)
-                },
+                Some(state) => Some(state.reject(context.clone()).await),
                 None => unreachable!(),
             };
         }
         self.inner = match self.inner.take(){
-            Some(mut state) => {
-                state.accept(context.clone(), clcw.report_value());
-                Some(state)
-            },
+            Some(state) => Some(state.accept(context.clone(), clcw.report_value()).await),
             None => unreachable!(),
         };
         self.inner = match self.inner.take(){
-            Some(state) => Some(state.lockout(context.clone(), clcw.lockout() == 1)),
+            Some(state) => Some(state.lockout(context.clone(), clcw.lockout() == 1).await),
             None => unreachable!(),
         };
     }
-    pub fn cancel(&mut self) -> Result<()> {
+    pub async fn cancel(&mut self) -> Result<()> {
         let context = self.get_context();
         let res = match self.inner.take(){
-            Some(state) => state.terminate(context),
-            None => unreachable!(),
-        };
-        match res {
-            Ok(state) => {
-                self.inner = Some(state);
-                Ok(())
-            },
-            Err(e) => {
-                self.inner = Some(e.state);
-                Err(e.message)
-            },
-        }
-    }
-    pub fn start_unlocking(&mut self) -> Result<()> {
-        let context = self.get_context();
-        let res = match self.inner.take(){
-            Some(state) => state.start_unlocking(context),
+            Some(state) => state.terminate(context).await,
             None => unreachable!(),
         };
         match res {
@@ -981,10 +1134,10 @@ where
             },
         }
     }
-    pub fn start_initializing(&mut self, vsvr: u8) -> Result<()> {
+    pub async fn start_unlocking(&mut self) -> Result<()> {
         let context = self.get_context();
         let res = match self.inner.take(){
-            Some(state) => state.start_initializing(context, vsvr),
+            Some(state) => state.start_unlocking(context).await,
             None => unreachable!(),
         };
         match res {
@@ -998,10 +1151,10 @@ where
             },
         }
     }
-    pub fn auto_retransmit_enable(&mut self) -> Result<()> {
+    pub async fn start_initializing(&mut self, vsvr: u8) -> Result<()> {
         let context = self.get_context();
         let res = match self.inner.take(){
-            Some(state) => state.auto_retransmit_enable(context),
+            Some(state) => state.start_initializing(context, vsvr).await,
             None => unreachable!(),
         };
         match res {
@@ -1015,10 +1168,27 @@ where
             },
         }
     }
-    pub fn auto_retransmit_disable(&mut self) -> Result<()> {
+    pub async fn auto_retransmit_enable(&mut self) -> Result<()> {
         let context = self.get_context();
         let res = match self.inner.take(){
-            Some(state) => state.auto_retransmit_disable(context),
+            Some(state) => state.auto_retransmit_enable(context).await,
+            None => unreachable!(),
+        };
+        match res {
+            Ok(state) => {
+                self.inner = Some(state);
+                Ok(())
+            },
+            Err(e) => {
+                self.inner = Some(e.state);
+                Err(e.message)
+            },
+        }
+    }
+    pub async fn auto_retransmit_disable(&mut self) -> Result<()> {
+        let context = self.get_context();
+        let res = match self.inner.take(){
+            Some(state) => state.auto_retransmit_disable(context).await,
             None => unreachable!(),
         };
         match res {
@@ -1054,32 +1224,52 @@ where
         }
     }
 
-    pub fn break_point_confirm(&mut self, cmd_ctx: CommandContext) -> Result<()> {
+    pub async fn break_point_confirm(&mut self, cmd_ctx: CommandContext) -> Result<()> {
         let context = self.get_context();
-        let (ret, next_id) = match self.inner.as_mut(){
+        match self.inner.take(){
             Some(state) => {
-                let ret = state.break_point_confirm(context, cmd_ctx);
-                let next_id = state.get_next_id();
-                (ret, next_id)
+                let ret = state.break_point_confirm(context, cmd_ctx).await;
+                match ret {
+                    Ok(state) => {
+                        let next_id = state.get_next_id();
+                        self.inner = Some(state);
+                        self.next_id = next_id.unwrap_or(self.next_id);
+                        Ok(())
+                    },
+                    Err(e) => {
+                        let next_id = e.state.get_next_id();
+                        self.inner = Some(e.state);
+                        self.next_id = next_id.unwrap_or(self.next_id);
+                        Err(e.message)
+                    },
+                }
             },
             None => unreachable!(),
-        };
-        self.next_id = next_id.unwrap_or(self.next_id);
-        ret
+        }
     }
 
-    pub fn append(&mut self, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>> {
+    pub async fn append(&mut self, cmd_ctx: CommandContext) -> Result<Option<CopTaskId>> {
         let context = self.get_context();
-        let (ret, next_id) = match self.inner.as_mut(){
+        match self.inner.take(){
             Some(state) => {
-                let ret = state.append(context, cmd_ctx);
-                let next_id = state.get_next_id();
-                (ret, next_id)
+                let ret = state.append(context, cmd_ctx).await;
+                match ret {
+                    Ok((state, id)) => {
+                        let next_id = state.get_next_id();
+                        self.inner = Some(state);
+                        self.next_id = next_id.unwrap_or(self.next_id);
+                        Ok(id)
+                    },
+                    Err(e) => {
+                        let next_id = e.state.get_next_id();
+                        self.inner = Some(e.state);
+                        self.next_id = next_id.unwrap_or(self.next_id);
+                        Err(e.message)
+                    },
+                }
             },
             None => unreachable!(),
-        };
-        self.next_id = next_id.unwrap_or(self.next_id);
-        ret
+        }
     }
     pub async fn execute(&mut self) {
         let context = self.get_context();
@@ -1100,7 +1290,7 @@ mod tests {
     use anyhow::Result;
     use gaia_ccsds_c2a::{access::cmd::schema::CommandSchema, ccsds::tc::{self, clcw::CLCW, sync_and_channel_coding::FrameType}};
     use gaia_tmtc::{cop::CopWorkerStatusPattern, tco_tmiv::Tco};
-    use tokio::sync::{broadcast, Mutex};
+    use tokio::sync::{mpsc, Mutex};
 
     impl<T> FopStateMachine<T> 
     where 
@@ -1180,9 +1370,9 @@ mod tests {
     #[tokio::test]
     async fn clcw_unreceived_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1199,26 +1389,26 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        fop_sm.evaluate_timeout();
+        fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "cancel is not allowed in clcw_unreceived state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_unlocking();
+        let res = fop_sm.start_unlocking().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_unlocking is not allowed in clcw_unreceived state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in clcw_unreceived state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in clcw_unreceived state");
 
@@ -1230,7 +1420,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in clcw_unreceived state");
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "append is not allowed in clcw_unreceived state");
 
@@ -1243,9 +1433,9 @@ mod tests {
     #[tokio::test]
     async fn clcw_unreceived_clcw_received(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1262,20 +1452,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn clcw_unreceived_lockout(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1292,20 +1482,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn clcw_unreceived_set_clcw(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1322,20 +1512,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn clcw_unreceived_auto_retransmit_disable() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1352,20 +1542,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "CLCW Unreceived");
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn idle_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1384,29 +1574,29 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        fop_sm.evaluate_timeout();
+        fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "cancel is not allowed in idle state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_unlocking();
+        let res = fop_sm.start_unlocking().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_unlocking is not allowed in idle state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in idle state");
 
@@ -1418,7 +1608,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in idle state");
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "append is not allowed in idle state");
 
@@ -1431,9 +1621,9 @@ mod tests {
     #[tokio::test]
     async fn idle_lockout(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1452,20 +1642,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn idle_start_initialize(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1484,20 +1674,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerInitialize as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn idle_auto_retransmit_disable() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1516,20 +1706,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn lockout_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1548,29 +1738,29 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        fop_sm.evaluate_timeout();
+        fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "cancel is not allowed in lockout state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in lockout state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in lockout state");
 
@@ -1582,7 +1772,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in lockout state");
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "append is not allowed in lockout state");
 
@@ -1595,9 +1785,9 @@ mod tests {
     #[tokio::test]
     async fn lockout_unlocked(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1616,7 +1806,7 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
@@ -1626,9 +1816,9 @@ mod tests {
     #[tokio::test]
     async fn lockout_auto_retransmit_disable() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1647,20 +1837,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn lockout_start_unlocking(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1679,20 +1869,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
-        let res = fop_sm.start_unlocking();
+        let res = fop_sm.start_unlocking().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerUnlocking as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn unlocking_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1711,25 +1901,25 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        let res = fop_sm.start_unlocking();
+        let res = fop_sm.start_unlocking().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_unlocking is not allowed in unlocking state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in unlocking state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in unlocking state");
 
@@ -1741,7 +1931,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in unlocking state");
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "append is not allowed in unlocking state");
 
@@ -1756,9 +1946,9 @@ mod tests {
     #[tokio::test]
     async fn unlocking_unlocked(){
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1777,20 +1967,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerIdle as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn unlocking_cancelled() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1809,21 +1999,21 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerCanceled as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn unlocking_auto_retransmit_disable() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1842,20 +2032,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn unlocking_timeout() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1877,21 +2067,21 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        fop_sm.evaluate_timeout();
+        fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerTimeout as i32);
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn initialize_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1911,20 +2101,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in initialize state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in initialize state");
 
@@ -1936,7 +2126,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "send_unlock_command is not allowed in initialize state");
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "append is not allowed in initialize state");
 
@@ -1951,9 +2141,9 @@ mod tests {
     #[tokio::test]
     async fn initialize_timeout() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -1977,20 +2167,20 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        fop_sm.evaluate_timeout();
+        fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerTimeout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn initialize_cancelled() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2010,20 +2200,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Idle");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerCanceled as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn initialize_auto_retransmit_disable() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2043,20 +2233,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerAutoRetransmitOff as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn initialize_vsvr_matched() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2080,21 +2270,21 @@ mod tests {
 
         let vsvr = 10;
 
-        fop_sm.set_clcw(&create_clcw(vsvr, false, false));
+        fop_sm.set_clcw(&create_clcw(vsvr, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
         assert_eq!(fop_sm.next_id, 50);
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerActive as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn initialize_lockout() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, mut worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, mut worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2116,20 +2306,20 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Lockout");
 
         assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerLockout as i32);
-        assert_eq!(worker_rx.try_recv().unwrap_err(), broadcast::error::TryRecvError::Empty);
+        assert_eq!(worker_rx.try_recv().unwrap_err(), mpsc::error::TryRecvError::Empty);
     }
 
     #[tokio::test]
     async fn auto_retransmit_off_without_transition() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, mut queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2147,29 +2337,29 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
-        fop_sm.set_clcw(&create_clcw(0, false, false));
+        fop_sm.set_clcw(&create_clcw(0, false, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
-        fop_sm.set_clcw(&create_clcw(0, true, false));
+        fop_sm.set_clcw(&create_clcw(0, true, false)).await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
-        let res = fop_sm.cancel();
+        let res = fop_sm.cancel().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "cancel is not allowed in auto_retransmit_off state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.start_initializing(0);
+        let res = fop_sm.start_initializing(0).await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_initializing is not allowed in auto_retransmit_off state");
         assert!(fop_sm.inner.is_some());
 
-        let res = fop_sm.auto_retransmit_disable();
+        let res = fop_sm.auto_retransmit_disable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_disable is not allowed in auto_retransmit_off state");
 
@@ -2182,6 +2372,9 @@ mod tests {
         assert_eq!(mock_sc.get_transmitted().await[0].2, FrameType::TypeBC);
         assert_eq!(mock_sc.get_transmitted().await[0].4, vec![0b10000010, 0b00000000, vr]);
 
+        let res = queue_rx.try_recv();
+        assert_eq!(res.unwrap().head_vs, vr as u32);
+
         let res = fop_sm.send_unlock_command().await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
@@ -2190,7 +2383,7 @@ mod tests {
         assert_eq!(mock_sc.get_transmitted().await[1].2, FrameType::TypeBC);
         assert_eq!(mock_sc.get_transmitted().await[1].4, vec![0u8]);
 
-        let res = fop_sm.append(create_cmd_ctx());
+        let res = fop_sm.append(create_cmd_ctx()).await;
         assert!(res.is_ok());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Auto Retransmit Off");
 
@@ -2199,14 +2392,17 @@ mod tests {
         assert_eq!(mock_sc.get_transmitted().await[2].0, 100);
         assert_eq!(mock_sc.get_transmitted().await[2].2, FrameType::TypeAD);        
         assert_eq!(mock_sc.get_transmitted().await[2].3, vr);
+
+        let res = queue_rx.try_recv();
+        assert_eq!(res.unwrap().head_vs, vr as u32 + 1);
     }
 
     #[tokio::test]
     async fn active_do_nothing() {
         // ブロードキャストチャネルを作成
-        let (worker_tx, _worker_rx) = broadcast::channel(16);
-        let (queue_tx, _queue_rx) = broadcast::channel(16);
-        let (task_tx, _task_rx) = broadcast::channel(16);
+        let (worker_tx, _worker_rx) = mpsc::channel(16);
+        let (queue_tx, _queue_rx) = mpsc::channel(16);
+        let (task_tx, _task_rx) = mpsc::channel(16);
 
         // モックSyncAndChannelCodingを初期化
         let mock_sc = MockSyncAndChannelCoding::new();
@@ -2221,20 +2417,20 @@ mod tests {
 
         let vr = 10;
 
-        fop_sm.set_inner(Box::new(FopStateActive::new(vr, 50, fop_sm.get_context().get_queue_context())));
+        fop_sm.set_inner(Box::new(FopStateActive::new(vr, 50, fop_sm.get_context().get_queue_context()).await));
 
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
 
-        fop_sm.clcw_received();
+        fop_sm.clcw_received().await;
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Active");
 
-        let res = fop_sm.start_unlocking();
+        let res = fop_sm.start_unlocking().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "start_unlocking is not allowed in active state");
 
-        let res = fop_sm.auto_retransmit_enable();
+        let res = fop_sm.auto_retransmit_enable().await;
         assert!(res.is_err());
         assert_eq!(res.err().unwrap().to_string(), "auto_retransmit_enable is not allowed in active state");
 

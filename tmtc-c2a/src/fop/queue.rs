@@ -1,9 +1,9 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
 use chrono::{DateTime, Utc};
 use gaia_tmtc::{cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopQueueStatusPattern}, tco_tmiv::Tco};
 use prost_types::Timestamp;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::satellite::CopTaskId;
@@ -34,21 +34,24 @@ impl FromIdTco for CopTaskStatus {
     }
 }
 
+type FopQueuePushOutput = (Box<dyn FopQueueStateNode>, CopTaskId);
+type FopQueueExecuteOutput = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>);
+
 trait FopQueueStateNode {
     fn get_oldest_arrival_time(&self) -> Option<DateTime<Utc>>;
     fn next_id(&self) -> CopTaskId;
-    fn push(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) -> CopTaskId;
-    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext);
-    fn execute(self: Box<Self>, context: FopQueueContext) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>);
-    fn accept(self: Box<Self>, context: FopQueueContext, vr: u8) -> Box<dyn FopQueueStateNode>;
-    fn reject(self: Box<Self>, context: FopQueueContext) -> Box<dyn FopQueueStateNode>;
-    fn clear(&mut self, context: FopQueueContext, status_pattern: CopTaskStatusPattern);
+    fn push(self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopQueuePushOutput>>>;
+    fn confirm(self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
+    fn execute(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = FopQueueExecuteOutput>>>;
+    fn accept(self: Box<Self>, context: FopQueueContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
+    fn reject(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
+    fn clear(self: Box<Self>, context: FopQueueContext, status_pattern: CopTaskStatusPattern) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
 }
 
 #[derive(Clone)]
 pub struct FopQueueContext {
-    pub task_status_tx: broadcast::Sender<CopTaskStatus>,
-    pub queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
+    pub task_status_tx: mpsc::Sender<CopTaskStatus>,
+    pub queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
 }
 
 enum FopQueueTask {
@@ -88,7 +91,7 @@ impl ProcessingQueue {
             vs_at_id0: vs.wrapping_sub(next_id as u8) as u32,
         }
     }
-    fn update_status(&mut self, queue_status_tx: broadcast::Sender<CopQueueStatusSet>) {
+    async fn update_status(&mut self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
         let (pending_vs, pending) = {
             if let Some((head_id, qctx)) = self.pending.front() {
                 let ctx = qctx.context();
@@ -160,7 +163,7 @@ impl ProcessingQueue {
             timestamp,
             status: CopQueueStatusPattern::Processing.into(),
         };
-        if let Err(e) = queue_status_tx.send(status) {
+        if let Err(e) = queue_status_tx.send(status).await {
             error!("failed to send FOP queue status: {}", e);
         }
     }
@@ -173,23 +176,25 @@ impl FopQueueStateNode for ProcessingQueue {
     fn next_id(&self) -> CopTaskId {
         self.next_id
     }
-    fn push(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) -> CopTaskId {
+    fn push(mut self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, CopTaskId)>>> {
         let id = self.next_id;
         self.next_id += 1;
         let id_tco = (id, cmd_ctx.tco.as_ref().clone());
         self.pending.push_back((id, FopQueueTask::Process(cmd_ctx.clone())));
         let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending, false);
-        if let Err(e) = context.task_status_tx.send(status) {
-            error!("failed to send COP status: {}", e);
-        }
-        self.update_status(context.queue_status_tx);
-        id
+        Box::pin(async move {
+            self.update_status(context.queue_status_tx).await;
+            if let Err(e) = context.task_status_tx.send(status).await {
+                error!("failed to send COP status: {}", e);
+            }
+            (self as Box<dyn FopQueueStateNode>, id)
+        })
     }
-    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
+    fn confirm(mut self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
         if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
-            return
+            return Box::pin(async move { self as Box<dyn FopQueueStateNode> });
         } else if self.pending.is_empty() && self.executed.is_empty() && self.rejected.is_empty() {
-            return
+            return Box::pin(async move { self as Box<dyn FopQueueStateNode> });
         }
         self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
         let status = CopTaskStatus::from_id_tco(
@@ -197,135 +202,147 @@ impl FopQueueStateNode for ProcessingQueue {
             CopTaskStatusPattern::Pending,
             true,
         );
-        if let Err(e) = context.task_status_tx.send(status) {
-            error!("failed to send COP status: {}", e);
-        }
         self.next_id += 1;
-        self.update_status(context.queue_status_tx);
+        Box::pin(async move {
+            self.update_status(context.queue_status_tx).await;
+            if let Err(e) = context.task_status_tx.send(status).await {
+                error!("failed to send COP status: {}", e);
+            }
+            self as Box<dyn FopQueueStateNode>
+        })
     }
     fn execute(
         mut self: Box<Self>,
         context: FopQueueContext,
-    ) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>) {
-        let (id, ctx, time) = match self.rejected.pop_front() {
-            Some((id,ctx,time)) => (id,ctx, time),
-            None => match self.pending.pop_front() {
-                Some((id, FopQueueTask::Process(ctx))) => (id, ctx, chrono::Utc::now().naive_utc().and_utc()),
-                Some((id, FopQueueTask::Confirm(ctx))) => {
-                    let pending = self.pending;
-                    let confirm = (id, ctx.clone(), chrono::Utc::now().naive_utc().and_utc());
-                    let status = CopTaskStatus::from_id_tco(
-                        (id, ctx.tco.as_ref().clone()),
-                        CopTaskStatusPattern::Executed,
-                        true,
-                    );
-                    if let Err(e) = context.task_status_tx.send(status) {
-                        error!("failed to send COP status: {}", e);
-                    }
-                    return (
-                        Box::new(ConfirmingQueue{
-                            pending,
-                            confirm,
-                            executed: self.executed,
-                            oldest_arrival_time: self.oldest_arrival_time,
-                            next_id: self.next_id,
-                            vs_at_id0: self.vs_at_id0,
-                        }),
-                        Some(((id + self.vs_at_id0) as u8, ctx))
-                    )
+    ) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
+        Box::pin(async move {
+            let (id, ctx, time) = match self.rejected.pop_front() {
+                Some((id,ctx,time)) => (id,ctx, time),
+                None => match self.pending.pop_front() {
+                    Some((id, FopQueueTask::Process(ctx))) => (id, ctx, chrono::Utc::now().naive_utc().and_utc()),
+                    Some((id, FopQueueTask::Confirm(ctx))) => {
+                        let pending = self.pending;
+                        let confirm = (id, ctx.clone(), chrono::Utc::now().naive_utc().and_utc());
+                        let status = CopTaskStatus::from_id_tco(
+                            (id, ctx.tco.as_ref().clone()),
+                            CopTaskStatusPattern::Executed,
+                            true,
+                        );
+                        if let Err(e) = context.task_status_tx.send(status).await {
+                            error!("failed to send COP status: {}", e);
+                        }
+                        return (
+                            Box::new(ConfirmingQueue{
+                                pending,
+                                confirm,
+                                executed: self.executed,
+                                oldest_arrival_time: self.oldest_arrival_time,
+                                next_id: self.next_id,
+                                vs_at_id0: self.vs_at_id0,
+                            }) as Box<dyn FopQueueStateNode>,
+                            Some(((id + self.vs_at_id0) as u8, ctx))
+                        )
+                    },
+                    None =>  return (self as Box<dyn FopQueueStateNode> ,None),
                 },
-                None => return (self ,None),
-            },
-        };
-        let ret = ((id + self.vs_at_id0) as u8, ctx.clone());
-        self.executed.push_back((id, ctx.clone(), time));
-        let status = CopTaskStatus::from_id_tco(
-            (id, ctx.tco.as_ref().clone()),
-            CopTaskStatusPattern::Executed,
-            false,
-        );
-        if let Err(e) = context.task_status_tx.send(status) {
-            error!("failed to send COP status: {}", e);
-        }
-        self.update_status(context.queue_status_tx);
-        (self, Some(ret))
+            };
+            let ret = ((id + self.vs_at_id0) as u8, ctx.clone());
+            self.executed.push_back((id, ctx.clone(), time));
+            let status = CopTaskStatus::from_id_tco(
+                (id, ctx.tco.as_ref().clone()),
+                CopTaskStatusPattern::Executed,
+                false,
+            );
+            if let Err(e) = context.task_status_tx.send(status).await {
+                error!("failed to send COP status: {}", e);
+            }
+            self.update_status(context.queue_status_tx).await;
+            (self as Box<dyn FopQueueStateNode>, Some(ret))
+        })
     }
 
     fn accept(
         mut self: Box<Self>, 
         context: FopQueueContext,
         vr: u8,
-    ) -> Box<dyn FopQueueStateNode> {
-        let accepted_num = if let Some((head_id, _, _)) = self.executed.front() {
-            if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
-                0
+    ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            let accepted_num = if let Some((head_id, _, _)) = self.executed.front() {
+                if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
+                    0
+                } else {
+                    vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
+                }
             } else {
-                vr.wrapping_sub((head_id + self.vs_at_id0) as u8)
+                return self as Box<dyn FopQueueStateNode>;
+            }; 
+            let accepted = self
+                .executed
+                .drain(0..(accepted_num as usize))
+                .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+            for id_tco in accepted {
+                if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
+                    id_tco,
+                    CopTaskStatusPattern::Accepted,
+                    false,
+                )).await {
+                    error!("failed to send COP status: {}", e);
+                }
             }
-        } else {
-            return self
-        }; 
-        let accepted = self
-            .executed
-            .drain(0..(accepted_num as usize))
-            .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
-        for id_tco in accepted {
-            if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
-                id_tco,
-                CopTaskStatusPattern::Accepted,
-                false,
-            )) {
-                error!("failed to send COP status: {}", e);
-            }
-        }
-        self.update_status(context.queue_status_tx);
-        self
+            self.update_status(context.queue_status_tx).await;
+            self as Box<dyn FopQueueStateNode>
+        })
     }
 
     fn reject(
         mut self: Box<Self>,
         context: FopQueueContext,
-    ) -> Box<dyn FopQueueStateNode> {
-        let stash = self.rejected.drain(..);
-        let (ret, mut moved): (Vec<_>, Vec<_>) = self
-            .executed
-            .drain(..)
-            .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
-            .unzip();
-        self.rejected = moved.drain(..).chain(stash).collect();
-        for id_tco in ret.into_iter() {
-            if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
-                id_tco,
-                CopTaskStatusPattern::Rejected,
-                false,
-            )) {
-                error!("failed to send COP status: {}", e);
+    ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            let stash = self.rejected.drain(..);
+            let (ret, mut moved): (Vec<_>, Vec<_>) = self
+                .executed
+                .drain(..)
+                .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
+                .unzip();
+            self.rejected = moved.drain(..).chain(stash).collect();
+            for id_tco in ret.into_iter() {
+                if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
+                    id_tco,
+                    CopTaskStatusPattern::Rejected,
+                    false,
+                )).await {
+                    error!("failed to send COP status: {}", e);
+                }
             }
-        }
-        self.update_status(context.queue_status_tx);
-        self
+            self.update_status(context.queue_status_tx).await;
+            self as Box<dyn FopQueueStateNode>
+        })
     }
 
     fn clear(
-        &mut self, 
+        mut self: Box<Self>, 
         context: FopQueueContext,
         status_pattern: CopTaskStatusPattern
-    ) {
-        let canceled = self
-            .pending
-            .drain(..)
-            .map(|(id, task)| (id, task.context()))
-            .chain(self.executed.drain(..).map(|(id, ctx, _)| (id, ctx)))
-            .chain(self.rejected.drain(..).map(|(id, ctx, _)| (id, ctx)))
-            .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
-        for id_tco in canceled {
-            if let Err(e) = context.task_status_tx
-                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false))
-            {
-                error!("failed to send COP status: {}", e);
+    ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            let canceled = self
+                .pending
+                .drain(..)
+                .map(|(id, task)| (id, task.context()))
+                .chain(self.executed.drain(..).map(|(id, ctx, _)| (id, ctx)))
+                .chain(self.rejected.drain(..).map(|(id, ctx, _)| (id, ctx)))
+                .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
+            for id_tco in canceled {
+                if let Err(e) = context.task_status_tx
+                    .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false)).await
+                {
+                    error!("failed to send COP status: {}", e);
+                }
             }
-        }
-        self.update_status(context.queue_status_tx);
+            self.update_status(context.queue_status_tx).await;
+            self as Box<dyn FopQueueStateNode>
+        })
     }
 }
 
@@ -339,7 +356,7 @@ struct ConfirmingQueue {
 }
 
 impl ConfirmingQueue {
-    fn update_status(&mut self, queue_status_tx: broadcast::Sender<CopQueueStatusSet>) {
+    async fn update_status(&mut self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
         let (pending_vs, pending) = {
             if let Some((head_id, qctx)) = self.pending.front() {
                 let ctx = qctx.context();
@@ -397,7 +414,7 @@ impl ConfirmingQueue {
             timestamp,
             status: CopQueueStatusPattern::Confirming.into(),
         };
-        if let Err(e) = queue_status_tx.send(status) {
+        if let Err(e) = queue_status_tx.send(status).await {
             error!("failed to send FOP queue status: {}", e);
         }
     }
@@ -410,179 +427,193 @@ impl FopQueueStateNode for ConfirmingQueue {
     fn next_id(&self) -> CopTaskId {
         self.next_id
     }
-    fn push(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) -> CopTaskId {
-        let id = self.next_id;
-        self.next_id += 1;
-        let id_tco = (id, cmd_ctx.tco.as_ref().clone());
-        self.pending.push_back((id, FopQueueTask::Process(cmd_ctx.clone())));
-        let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending, false);
-        if let Err(e) = context.task_status_tx.send(status) {
-            error!("failed to send COP status: {}", e);
-        }
-        self.update_status(context.queue_status_tx);
-        id
-    }
-    fn confirm(&mut self, context: FopQueueContext, cmd_ctx: CommandContext) {
-        if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
-            return
-        } else if self.pending.is_empty() {
-            return
-        }
-        self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
-        let status = CopTaskStatus::from_id_tco(
-            (self.next_id, cmd_ctx.tco.as_ref().clone()),
-            CopTaskStatusPattern::Pending,
-            true,
-        );
-        if let Err(e) = context.task_status_tx.send(status) {
-            error!("failed to send COP status: {}", e);
-        }
-        self.next_id += 1;
-        self.update_status(context.queue_status_tx);
-    }
-    fn execute(self: Box<Self>, context: FopQueueContext) -> (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>) {
-        let (id, ctx) = {
-            let (id, ctx, _) = self.confirm.clone();
-            let status = CopTaskStatus::from_id_tco(
-                (id, ctx.tco.as_ref().clone()),
-                CopTaskStatusPattern::Executed,
-                true,
-            );
-            if let Err(e) = context.task_status_tx.send(status) {
+    fn push(mut self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, CopTaskId)>>> {
+        Box::pin(async move {
+            let id = self.next_id;
+            self.next_id += 1;
+            let id_tco = (id, cmd_ctx.tco.as_ref().clone());
+            self.pending.push_back((id, FopQueueTask::Process(cmd_ctx.clone())));
+            let status = CopTaskStatus::from_id_tco(id_tco, CopTaskStatusPattern::Pending, false);
+            if let Err(e) = context.task_status_tx.send(status).await {
                 error!("failed to send COP status: {}", e);
             }
-            ((id + self.vs_at_id0) as u8, ctx)
-        };
-        (self, Some((id, ctx)))
+            self.update_status(context.queue_status_tx).await;
+            (self as Box<dyn FopQueueStateNode>, id)
+        })
     }
-    fn accept(mut self: Box<Self>, context: FopQueueContext, vr: u8) -> Box<dyn FopQueueStateNode> {
-        if let Some((head_id, _, _)) = self.executed.front() {
-            if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > (self.executed.len() + 1) as u8 {
-                self
-            } else if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
-                let accepted = self
-                    .executed
-                    .drain(..)
-                    .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
-                for id_tco in accepted {
-                    if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
-                        id_tco,
-                        CopTaskStatusPattern::Accepted,
-                        false
-                    )) {
-                        error!("failed to send COP status: {}", e);
-                    }
-                }
+    fn confirm(mut self: Box<Self>, context: FopQueueContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            if let Some((_, FopQueueTask::Confirm(_))) = self.pending.back() {
+                return self as Box<dyn FopQueueStateNode>;
+            } else if self.pending.is_empty() {
+                return self as Box<dyn FopQueueStateNode>;
+            }
+            self.pending.push_back((self.next_id, FopQueueTask::Confirm(cmd_ctx.clone())));
+            let status = CopTaskStatus::from_id_tco(
+                (self.next_id, cmd_ctx.tco.as_ref().clone()),
+                CopTaskStatusPattern::Pending,
+                true,
+            );
+            if let Err(e) = context.task_status_tx.send(status).await {
+                error!("failed to send COP status: {}", e);
+            }
+            self.next_id += 1;
+            self.update_status(context.queue_status_tx).await;
+            self as Box<dyn FopQueueStateNode>
+        })
+    }
+    fn execute(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
+        Box::pin(async move {
+            let (id, ctx) = {
                 let (id, ctx, _) = self.confirm.clone();
                 let status = CopTaskStatus::from_id_tco(
                     (id, ctx.tco.as_ref().clone()),
-                    CopTaskStatusPattern::Accepted,
-                    true,
-                );
-                if let Err(e) = context.task_status_tx.send(status) {
-                    error!("failed to send COP status: {}", e);
-                }
-                self.update_status(context.queue_status_tx);
-                Box::new(ProcessingQueue {
-                    pending: self.pending,
-                    executed: self.executed,
-                    rejected: VecDeque::new(),
-                    oldest_arrival_time: self.oldest_arrival_time,
-                    next_id: self.next_id,
-                    vs_at_id0: self.vs_at_id0,
-                })
-            } else {
-                let accepted_num = vr.wrapping_sub((head_id + self.vs_at_id0) as u8);
-                let accepted = self
-                    .executed
-                    .drain(0..(accepted_num as usize))
-                    .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
-                for id_tco in accepted {
-                    if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
-                        id_tco,
-                        CopTaskStatusPattern::Accepted,
-                        false
-                    )) {
-                        error!("failed to send COP status: {}", e);
-                    }
-                }
-                self.update_status(context.queue_status_tx);
-                self
-            }
-        } else {
-            let (head_id, ctx, _) = self.confirm.clone();
-            if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 
-            || vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
-                self
-            } else {
-                let status = CopTaskStatus::from_id_tco(
-                    (head_id, ctx.tco.as_ref().clone()),
                     CopTaskStatusPattern::Executed,
                     true,
                 );
-                if let Err(e) = context.task_status_tx.send(status) {
+                if let Err(e) = context.task_status_tx.send(status).await {
                     error!("failed to send COP status: {}", e);
                 }
-                self.update_status(context.queue_status_tx);
-                Box::new(ProcessingQueue {
-                    pending: self.pending,
-                    executed: self.executed,
-                    rejected: VecDeque::new(),
-                    oldest_arrival_time: self.oldest_arrival_time,
-                    next_id: self.next_id,
-                    vs_at_id0: self.vs_at_id0,
-                })
-            }
-        } 
+                ((id + self.vs_at_id0) as u8, ctx)
+            };
+            (self as Box<dyn FopQueueStateNode>, Some((id, ctx)))
+        })
+    }
+    fn accept(mut self: Box<Self>, context: FopQueueContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move{
+            if let Some((head_id, _, _)) = self.executed.front() {
+                if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > (self.executed.len() + 1) as u8 {
+                    self
+                } else if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > self.executed.len() as u8 {
+                    let accepted = self
+                        .executed
+                        .drain(..)
+                        .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+                    for id_tco in accepted {
+                        if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
+                            id_tco,
+                            CopTaskStatusPattern::Accepted,
+                            false
+                        )).await {
+                            error!("failed to send COP status: {}", e);
+                        }
+                    }
+                    let (id, ctx, _) = self.confirm.clone();
+                    let status = CopTaskStatus::from_id_tco(
+                        (id, ctx.tco.as_ref().clone()),
+                        CopTaskStatusPattern::Accepted,
+                        true,
+                    );
+                    if let Err(e) = context.task_status_tx.send(status).await {
+                        error!("failed to send COP status: {}", e);
+                    }
+                    self.update_status(context.queue_status_tx).await;
+                    Box::new(ProcessingQueue {
+                        pending: self.pending,
+                        executed: self.executed,
+                        rejected: VecDeque::new(),
+                        oldest_arrival_time: self.oldest_arrival_time,
+                        next_id: self.next_id,
+                        vs_at_id0: self.vs_at_id0,
+                    })
+                } else {
+                    let accepted_num = vr.wrapping_sub((head_id + self.vs_at_id0) as u8);
+                    let accepted = self
+                        .executed
+                        .drain(0..(accepted_num as usize))
+                        .map(|(id, ctx, _)| (id, ctx.tco.as_ref().clone()));
+                    for id_tco in accepted {
+                        if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
+                            id_tco,
+                            CopTaskStatusPattern::Accepted,
+                            false
+                        )).await {
+                            error!("failed to send COP status: {}", e);
+                        }
+                    }
+                    self.update_status(context.queue_status_tx).await;
+                    self as Box<dyn FopQueueStateNode>
+                }
+            } else {
+                let (head_id, ctx, _) = self.confirm.clone();
+                if vr.wrapping_sub((head_id + self.vs_at_id0) as u8) > 1 
+                || vr.wrapping_sub((head_id + self.vs_at_id0) as u8) == 0 { 
+                    self
+                } else {
+                    let status = CopTaskStatus::from_id_tco(
+                        (head_id, ctx.tco.as_ref().clone()),
+                        CopTaskStatusPattern::Executed,
+                        true,
+                    );
+                    if let Err(e) = context.task_status_tx.send(status).await {
+                        error!("failed to send COP status: {}", e);
+                    }
+                    self.update_status(context.queue_status_tx).await;
+                    Box::new(ProcessingQueue {
+                        pending: self.pending,
+                        executed: self.executed,
+                        rejected: VecDeque::new(),
+                        oldest_arrival_time: self.oldest_arrival_time,
+                        next_id: self.next_id,
+                        vs_at_id0: self.vs_at_id0,
+                    }) as Box<dyn FopQueueStateNode>
+                }
+            } 
+        })
     }
 
     fn reject(
         mut self: Box<Self>,
         context: FopQueueContext,
-    ) -> Box<dyn FopQueueStateNode> {
-        let (ret, mut moved): (Vec<_>, Vec<_>) = self
-            .executed
-            .drain(..)
-            .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
-            .unzip();
-        let rejected = moved.drain(..).collect();
-        for id_tco in ret.into_iter() {
-            if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
-                id_tco,
-                CopTaskStatusPattern::Rejected,
-                false,
-            )) {
-                error!("failed to send COP status: {}", e);
+    ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            let (ret, mut moved): (Vec<_>, Vec<_>) = self
+                .executed
+                .drain(..)
+                .map(|(id, ctx, time)| ((id, ctx.tco.as_ref().clone()), (id, ctx, time)))
+                .unzip();
+            let rejected = moved.drain(..).collect();
+            for id_tco in ret.into_iter() {
+                if let Err(e) = context.task_status_tx.send(CopTaskStatus::from_id_tco(
+                    id_tco,
+                    CopTaskStatusPattern::Rejected,
+                    false,
+                )).await {
+                    error!("failed to send COP status: {}", e);
+                }
             }
-        }
-        let (confirm_id, confirm_ctx, _) = self.confirm.clone();
-        self.pending.push_front((confirm_id, FopQueueTask::Confirm(confirm_ctx)));
-        self.update_status(context.queue_status_tx);
-        Box::new(ProcessingQueue {
-            pending: self.pending,
-            executed: VecDeque::new(),
-            rejected,
-            oldest_arrival_time: self.oldest_arrival_time,
-            next_id: self.next_id,
-            vs_at_id0: self.vs_at_id0,
+            let (confirm_id, confirm_ctx, _) = self.confirm.clone();
+            self.pending.push_front((confirm_id, FopQueueTask::Confirm(confirm_ctx)));
+            self.update_status(context.queue_status_tx).await;
+            Box::new(ProcessingQueue {
+                pending: self.pending,
+                executed: VecDeque::new(),
+                rejected,
+                oldest_arrival_time: self.oldest_arrival_time,
+                next_id: self.next_id,
+                vs_at_id0: self.vs_at_id0,
+            }) as Box<dyn FopQueueStateNode>
         })
     }
 
     fn clear(
-        &mut self, 
+        mut self: Box<Self>, 
         context: FopQueueContext,
         status_pattern: CopTaskStatusPattern
-    ) {
-        let canceled = self.executed.drain(..).map(|(id, ctx, _)| (id, ctx))
-            .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
-        for id_tco in canceled {
-            if let Err(e) = context.task_status_tx
-                .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false))
-            {
-                error!("failed to send COP status: {}", e);
+    ) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>> {
+        Box::pin(async move {
+            let canceled = self.executed.drain(..).map(|(id, ctx, _)| (id, ctx))
+                .map(|(id, ctx)| (id, ctx.tco.as_ref().clone()));
+            for id_tco in canceled {
+                if let Err(e) = context.task_status_tx
+                    .send(CopTaskStatus::from_id_tco(id_tco, status_pattern, false)).await
+                {
+                    error!("failed to send COP status: {}", e);
+                }
             }
-        }
-        self.update_status(context.queue_status_tx);
+            self.update_status(context.queue_status_tx).await;
+            self as Box<dyn FopQueueStateNode>
+        })
     }
 }
 
@@ -591,13 +622,13 @@ pub struct FopQueue {
 }
 
 impl FopQueue {
-    pub fn new(
+    pub async fn new(
         vs: u8,
         next_id: CopTaskId,
         context: FopQueueContext,
     ) -> Self {
         let mut inner = ProcessingQueue::new(vs, next_id);
-        inner.update_status(context.queue_status_tx);
+        inner.update_status(context.queue_status_tx).await;
         Self {
             inner: Some(Box::new(ProcessingQueue::new(vs, next_id))),
         }
@@ -615,72 +646,76 @@ impl FopQueue {
         }
     }
 
-    pub fn push(
+    pub async fn push(
         &mut self, 
         queue_context: FopQueueContext,
         ctx: CommandContext,
     ) -> CopTaskId {
-        match &mut self.inner {
-            Some(inner) => inner.push(queue_context, ctx),
+        let (queue, id) = match self.inner.take() {
+            Some(inner) => inner.push(queue_context, ctx).await,
             None => unreachable!("FopQueue is empty"),
-        }
+        };
+        self.inner = Some(queue);
+        id
     }
 
-    pub fn confirm(
+    pub async fn confirm(
         &mut self, 
         queue_context: FopQueueContext,
         ctx: CommandContext,
     ) {
-        match &mut self.inner {
-            Some(inner) => inner.confirm(queue_context, ctx),
+        let queue = match self.inner.take() {
+            Some(inner) => inner.confirm(queue_context, ctx).await,
             None => unreachable!("FopQueue is empty"),
-        }
+        };
+        self.inner = Some(queue);
     }
 
-    pub fn execute(
+    pub async fn execute(
         &mut self,
         queue_context: FopQueueContext,
     ) -> Option<(u8, CommandContext)> {
         let (new_state, ret) = match self.inner.take(){
-            Some(inner) => inner.execute(queue_context),
+            Some(inner) => inner.execute(queue_context).await,
             None => unreachable!("FopQueue is empty"),
         };
         self.inner = Some(new_state);
         ret
     }
 
-    pub fn accept(
+    pub async fn accept(
         &mut self, 
         queue_context: FopQueueContext,
         vr: u8,
     ) {
         let new_state = match self.inner.take() {
-            Some(inner) => inner.accept(queue_context, vr),
+            Some(inner) => inner.accept(queue_context, vr).await,
             None => unreachable!("FopQueue is empty"),
         };
         self.inner = Some(new_state);
     }
 
-    pub fn reject(
+    pub async fn reject(
         &mut self,
         queue_context: FopQueueContext
     ) {
         let new_state = match self.inner.take() {
-            Some(inner) => inner.reject(queue_context),
+            Some(inner) => inner.reject(queue_context).await,
             None => unreachable!("FopQueue is empty"),
         };
         self.inner = Some(new_state);
     }
 
-    pub fn clear(
+    pub async fn clear(
         &mut self, 
         queue_context: FopQueueContext,
         status_pattern: CopTaskStatusPattern, 
     ) {
-        match &mut self.inner {
-            Some(inner) => inner.clear(queue_context, status_pattern),
+        let queue = match self.inner.take() {
+            Some(inner) => inner.clear(queue_context, status_pattern).await,
             None => unreachable!("FopQueue is empty"),
-        }
+        };
+        self.inner = Some(queue);
     }
 }
 
@@ -690,7 +725,7 @@ mod tests {
 
     use gaia_ccsds_c2a::access::cmd::schema::CommandSchema;
     use gaia_tmtc::{cop::{CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern}, tco_tmiv::Tco};
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
     use crate::{fop::{queue::{FopQueue, FopQueueContext}, worker::CommandContext}, registry::FatCommandSchema};
 
@@ -717,9 +752,9 @@ mod tests {
         }
     }
 
-    fn create_test_context() -> (FopQueueContext, broadcast::Receiver<CopTaskStatus>, broadcast::Receiver<CopQueueStatusSet>) {
-        let (task_status_tx, task_status_rx) = broadcast::channel(100);
-        let (queue_status_tx, queue_status_rx) = broadcast::channel(100);
+    fn create_test_context() -> (FopQueueContext, mpsc::Receiver<CopTaskStatus>, mpsc::Receiver<CopQueueStatusSet>) {
+        let (task_status_tx, task_status_rx) = mpsc::channel(100);
+        let (queue_status_tx, queue_status_rx) = mpsc::channel(100);
         let context = FopQueueContext {
             task_status_tx,
             queue_status_tx,
@@ -727,12 +762,12 @@ mod tests {
         (context, task_status_rx, queue_status_rx)
     }
 
-    #[test]
-    fn test_fop_queue_initialization() {
+    #[tokio::test]
+    async fn test_fop_queue_initialization() {
         let initial_id = 1;
         let vs = 10;
         let (ctx, _, mut queue_rx) = create_test_context();
-        let queue = FopQueue::new(vs, initial_id, ctx.clone());
+        let queue = FopQueue::new(vs, initial_id, ctx.clone()).await;
         
         assert_eq!(queue.next_id(), initial_id);
         assert_eq!(queue.get_oldest_arrival_time(), None);
@@ -743,12 +778,12 @@ mod tests {
         assert_eq!(status.head_vs, vs as u32);
     }
 
-    #[test]
-    fn processing_push_task() {
+    #[tokio::test]
+    async fn processing_push_task() {
         let (context, mut task_rx, mut queue_rx) = create_test_context();
         let initial_id = 1;
         let vs = 10;
-        let mut queue = FopQueue::new(vs, initial_id, context.clone());
+        let mut queue = FopQueue::new(vs, initial_id, context.clone()).await;
         assert_eq!(queue.next_id(), initial_id);
         assert_eq!(queue.get_oldest_arrival_time(), None);
         let status = match queue_rx.try_recv() {
@@ -759,7 +794,7 @@ mod tests {
 
         let cmd_ctx = create_cmd_ctx();
 
-        let task_id = queue.push(context.clone(), cmd_ctx.clone());
+        let task_id = queue.push(context.clone(), cmd_ctx.clone()).await;
 
         assert_eq!(task_id, initial_id);
         assert_eq!(queue.next_id(), initial_id + 1);
@@ -782,5 +817,68 @@ mod tests {
         let pending = queue_status.pending.unwrap();
         assert_eq!(pending.head_id, Some(task_id));
         assert_eq!(pending.task_count, 1);
+    }
+
+    #[tokio::test]
+    async fn processing_confirm_task() {
+        let (context, mut task_rx, mut queue_rx) = create_test_context();
+        let initial_id = 1;
+        let vs = 10;
+        let mut queue = FopQueue::new(vs, initial_id, context.clone()).await;
+        assert_eq!(queue.next_id(), initial_id);
+        assert_eq!(queue.get_oldest_arrival_time(), None);
+        let status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert_eq!(status.head_vs, vs as u32);
+
+        let cmd_ctx = create_cmd_ctx();
+
+        queue.confirm(context.clone(), cmd_ctx.clone()).await;
+
+        let task_id = queue.push(context.clone(), cmd_ctx.clone()).await;
+
+        assert_eq!(task_id, initial_id);
+        assert_eq!(queue.next_id(), initial_id + 1);
+
+        // ステータスが送信されているか確認
+        let status = match task_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP status: {}", e),
+        };
+        assert_eq!(status.task_id, task_id);
+        assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
+        assert!(!status.is_confirm_command);
+
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert!(queue_status.pending.is_some());
+        let pending = queue_status.pending.unwrap();
+        assert_eq!(pending.head_id, Some(task_id));
+        assert_eq!(pending.task_count, 1);
+
+        queue.confirm(context.clone(), cmd_ctx.clone()).await;
+
+        // ステータスが送信されているか確認
+        let status = match task_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP status: {}", e),
+        };
+        assert_eq!(status.task_id, task_id + 1);
+        assert_eq!(status.status, CopTaskStatusPattern::Pending as i32);
+        assert!(status.is_confirm_command);
+
+        // キューのステータスが更新されているか確認
+        let queue_status = match queue_rx.try_recv() {
+            Ok(status) => status,
+            Err(e) => panic!("failed to receive COP queue status: {}", e),
+        };
+        assert!(queue_status.pending.is_some());
+        let pending = queue_status.pending.unwrap();
+        assert_eq!(pending.task_count, 2);
     }
 }

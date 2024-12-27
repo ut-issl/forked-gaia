@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gaia_ccsds_c2a::ccsds::{tc, aos};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use worker::{FopWorker, Reporter, Service};
 
 use crate::{registry::{CommandRegistry, TelemetryRegistry}, satellite::{self, create_clcw_channel, create_cop_command_channel, create_cop_task_channel, TelemetryReporter, TmivBuilder}};
@@ -33,9 +33,9 @@ where
     let (task_tx, task_rx) = create_cop_task_channel();
     let (clcw_tx, _) = create_clcw_channel();
     let (command_tx, command_rx) = create_cop_command_channel();
-    let (queue_status_tx, queue_status_rx) = broadcast::channel(10);
-    let (worker_state_tx, worker_state_rx) = broadcast::channel(10);
-    let (task_status_tx, task_status_rx) = broadcast::channel(10);
+    let (queue_status_tx, queue_status_rx) = mpsc::channel(10);
+    let (worker_state_tx, worker_state_rx) = mpsc::channel(10);
+    let (task_status_tx, task_status_rx) = mpsc::channel(10);
     (
         satellite::Service::new(task_tx),
         TelemetryReporter::new(

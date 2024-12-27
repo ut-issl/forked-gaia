@@ -5,7 +5,7 @@ use axum::async_trait;
 use gaia_ccsds_c2a::{ccsds::tc::{self, clcw::CLCW}, ccsds_c2a::tc::{segment, space_packet}};
 use gaia_tmtc::{cop::{cop_command, CopCommand, CopQueueStatusSet, CopTaskStatus, CopVsvr, CopWorkerStatus}, tco_tmiv::{Tco, Tmiv}, Handle};
 use prost_types::Timestamp;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::{fop::tlmcmd::build_clcw_tmiv, registry::{CommandRegistry, FatCommandSchema}, satellite::{CLCWReceiver, CopCommandReceiver, CopCommandSender, CopTaskReceiver}, tco::{self, ParameterListWriter}};
@@ -13,17 +13,17 @@ use crate::{fop::tlmcmd::build_clcw_tmiv, registry::{CommandRegistry, FatCommand
 use super::state_machine::FopStateMachine;
 
 pub struct Reporter {
-    worker_state_rx: broadcast::Receiver<CopWorkerStatus>,
-    queue_status_rx: broadcast::Receiver<CopQueueStatusSet>,
-    task_status_rx: broadcast::Receiver<CopTaskStatus>,
+    worker_state_rx: mpsc::Receiver<CopWorkerStatus>,
+    queue_status_rx: mpsc::Receiver<CopQueueStatusSet>,
+    task_status_rx: mpsc::Receiver<CopTaskStatus>,
     clcw_rx: CLCWReceiver,
 }
 
 impl Reporter {
     pub fn new(
-        worker_state_rx: broadcast::Receiver<CopWorkerStatus>,
-        queue_status_rx: broadcast::Receiver<CopQueueStatusSet>,
-        task_status_rx: broadcast::Receiver<CopTaskStatus>,
+        worker_state_rx: mpsc::Receiver<CopWorkerStatus>,
+        queue_status_rx: mpsc::Receiver<CopQueueStatusSet>,
+        task_status_rx: mpsc::Receiver<CopTaskStatus>,
         clcw_rx: CLCWReceiver,
     ) -> Self {
         Self {
@@ -52,26 +52,31 @@ impl Reporter {
         let vsvr = Arc::new(RwLock::new(CopVsvr::default()));
         let task_status_rx_task = async {
             loop {
-                let status = self.task_status_rx.recv().await?;
-                if let Err(e) = task_handler.handle(Arc::new(status)).await {
-                    error!("failed to send COP status: {}", e);
+                if let Some(status) = self.task_status_rx.recv().await {
+                    if let Err(e) = task_handler.handle(Arc::new(status)).await {
+                        error!("failed to send COP status: {}", e);
+                    }
+                } else {
+                    break Err(anyhow!("task status receiver has gone"));
                 }
             }
         };
         let worker_state_rx_task = async {
             loop {
-                let state = self.worker_state_rx.recv().await?;
-                if let Err(e) = worker_handler.handle(Arc::new(state)).await
-                {
-                    error!("failed to send COP status: {}", e);
+                if let Some(state) = self.worker_state_rx.recv().await {
+                    if let Err(e) = worker_handler.handle(Arc::new(state)).await
+                    {
+                        error!("failed to send COP status: {}", e);
+                    }
+                } else {
+                    break Err(anyhow!("worker state receiver has gone"));
                 }
             }
         };
         let mut vsvr_handler_clone = vsvr_handler.clone();
         let queue_status_rx_task = async {
             loop {
-                let status = self.queue_status_rx.recv().await?;
-                {
+                if let Some(status) = self.queue_status_rx.recv().await {
                     let now = chrono::Utc::now().naive_utc();
                     let timestamp = Some(Timestamp {
                         seconds: now.and_utc().timestamp(),
@@ -84,10 +89,12 @@ impl Reporter {
                     {
                         error!("failed to send VSVR status: {}", e);
                     }
-                }
-                if let Err(e) = queue_handler.handle(Arc::new(status)).await
-                {
-                    error!("failed to send COP status: {}", e);
+                    if let Err(e) = queue_handler.handle(Arc::new(status)).await
+                    {
+                        error!("failed to send COP status: {}", e);
+                    }
+                } else {
+                    break Err(anyhow!("queue status receiver has gone"));
                 }
             }
         };
@@ -254,9 +261,9 @@ where
         task_rx: CopTaskReceiver,
         clcw_rx: CLCWReceiver,
         command_rx: CopCommandReceiver,
-        queue_status_tx: broadcast::Sender<CopQueueStatusSet>,
-        worker_state_tx: broadcast::Sender<CopWorkerStatus>,
-        task_status_tx: broadcast::Sender<CopTaskStatus>,
+        queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
+        worker_state_tx: mpsc::Sender<CopWorkerStatus>,
+        task_status_tx: mpsc::Sender<CopTaskStatus>,
         sync_and_channel_coding: T,
         tc_scid: u16,
         registry: Arc<CommandRegistry>
@@ -311,7 +318,7 @@ where
                 instant.tick().await;
                 {
                     let mut sm_locked = state_machine_clone.lock().await;
-                    sm_locked.evaluate_timeout();
+                    sm_locked.evaluate_timeout().await;
                 }
             }
         };
@@ -320,13 +327,13 @@ where
             let mut last_clcw_opt: Option<CLCW> = None;
             while let Some(clcw) = clcw_rx.recv().await {
                 let mut sm_locked = state_machine_clone.lock().await;
-                sm_locked.clcw_received();
+                sm_locked.clcw_received().await;
                 if let Some(last_clcw) = &last_clcw_opt {
                     if last_clcw.clone().into_bytes() == clcw.clone().into_bytes() {
                         continue;
                     } 
                 }
-                sm_locked.set_clcw(&clcw);
+                sm_locked.set_clcw(&clcw).await;
                 last_clcw_opt = Some(clcw);
             }
             Err(anyhow!("CLCW connection has gone"))
@@ -345,7 +352,7 @@ where
                 };
                 let ret = if ctx.tco.is_type_ad {
                     let mut sm_locked = state_machine_clone.lock().await;
-                    sm_locked.append(ctx)
+                    sm_locked.append(ctx).await
                 } else if let Err(e) = ctx
                     .transmit_to(&mut sync_and_channel_coding, None)
                     .await
@@ -389,21 +396,21 @@ where
                 match command_inner {
                     cop_command::Command::Initialize(inner) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let ret = sm_locked.start_initializing(inner.vsvr as u8);
+                        let ret = sm_locked.start_initializing(inner.vsvr as u8).await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
                     }
                     cop_command::Command::Unlock(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let ret = sm_locked.start_unlocking();
+                        let ret = sm_locked.start_unlocking().await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
                     }
                     cop_command::Command::Terminate(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let ret = sm_locked.cancel();
+                        let ret = sm_locked.cancel().await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
@@ -417,14 +424,14 @@ where
                     }
                     cop_command::Command::SetAutoRetransmitEnable(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let ret = sm_locked.auto_retransmit_enable();
+                        let ret = sm_locked.auto_retransmit_enable().await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
                     }
                     cop_command::Command::SetAutoRetransmitDisable(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        let ret = sm_locked.auto_retransmit_disable();
+                        let ret = sm_locked.auto_retransmit_disable().await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
@@ -462,7 +469,7 @@ where
                             fat_schema,
                             tco,
                         };
-                        let ret = sm_locked.break_point_confirm(ctx);
+                        let ret = sm_locked.break_point_confirm(ctx).await;
                         if tx.send(ret).is_err() {
                             error!("response receiver has gone");
                         }
