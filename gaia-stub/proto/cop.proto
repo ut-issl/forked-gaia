@@ -167,6 +167,7 @@ message CopCommand {
     CopSendSetVRCommand send_set_vr = 7;
     CopSendUnlockCommand send_unlock = 8;
     CopBreakPointConfirmCommand break_point_confirm = 9;
+    CopStatusUpdateCommand status_update = 10;
   }
 }
 
@@ -199,4 +200,7 @@ message CopSendUnlockCommand {
 
 message CopBreakPointConfirmCommand {
   tco_tmiv.Tco confirmation_tco = 1;
+}
+
+message CopStatusUpdateCommand {
 }

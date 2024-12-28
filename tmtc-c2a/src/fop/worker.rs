@@ -410,7 +410,7 @@ where
                     }
                     cop_command::Command::SetTimeout(inner) => {
                         let mut sm_locked = state_machine_clone.lock().await;
-                        sm_locked.set_timeout_sec(inner.timeout_sec);
+                        sm_locked.set_timeout_sec(inner.timeout_sec).await;
                         if tx.send(Ok(())).is_err() {
                             error!("response receiver has gone");
                         }
@@ -464,6 +464,13 @@ where
                         };
                         let ret = sm_locked.break_point_confirm(ctx).await;
                         if tx.send(ret).is_err() {
+                            error!("response receiver has gone");
+                        }
+                    },
+                    cop_command::Command::StatusUpdate(_) => {
+                        let mut sm_locked = state_machine_clone.lock().await;
+                        sm_locked.send_status().await;
+                        if tx.send(Ok(())).is_err() {
                             error!("response receiver has gone");
                         }
                     }

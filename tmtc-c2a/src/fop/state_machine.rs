@@ -71,6 +71,8 @@ trait FopStateNode: Display {
 
     fn append (self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopTaskAppendResult>>>;
     fn get_next_id(&self) -> Option<CopTaskId>;
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 }
 
 #[derive(Clone)]
@@ -207,6 +209,13 @@ impl FopStateNode for FopStateIdle {
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
     }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerIdle).await;
+            self as Box<dyn FopStateNode>
+        })
+    }
 }
 
 struct FopStateLockout;
@@ -309,6 +318,13 @@ impl FopStateNode for FopStateLockout {
     }
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
+    }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerLockout).await;
+            self as Box<dyn FopStateNode>
+        })
     }
 }
 
@@ -453,6 +469,13 @@ impl FopStateNode for FopStateUnlocking {
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
     }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerUnlocking).await;
+            self as Box<dyn FopStateNode>
+        })
+    }
 }
 
 struct FopStateClcwUnreceived;
@@ -565,6 +588,13 @@ impl FopStateNode for FopStateClcwUnreceived {
     }
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
+    }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerClcwUnreceived).await;
+            self as Box<dyn FopStateNode>
+        })
     }
 }
 
@@ -711,6 +741,13 @@ impl FopStateNode for FopStateInitialize {
     }
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
+    }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            context.send_worker_status(CopWorkerStatusPattern::WorkerInitialize).await;
+            self as Box<dyn FopStateNode>
+        })
     }
 }
 
@@ -861,6 +898,14 @@ impl FopStateNode for FopStateActive {
     }
     fn get_next_id(&self) -> Option<CopTaskId> {
         Some(self.queue.next_id())
+    }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            self.queue.send_status(context.get_queue_context().queue_status_tx).await;
+            context.send_worker_status(CopWorkerStatusPattern::WorkerActive).await;
+            self as Box<dyn FopStateNode>
+        })
     }
 }
 
@@ -1033,6 +1078,16 @@ impl FopStateNode for FopStateAutoRetransmitOff {
     fn get_next_id(&self) -> Option<CopTaskId> {
         None
     }
+
+    fn send_status(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>> {
+        Box::pin(async move {
+            if let Err(e) = context.queue_status_tx.send(create_queue_status(self.next_vs)).await {
+                error!("failed to send queue status: {}", e);
+            }
+            context.send_worker_status(CopWorkerStatusPattern::WorkerAutoRetransmitOff).await;
+            self as Box<dyn FopStateNode>
+        })
+    }
 }
 
 pub struct FopStateMachine<T> 
@@ -1102,16 +1157,16 @@ where
             Some(state) => Some(state.vsvr_matched(context.clone(), clcw.report_value()).await),
             None => unreachable!(),
         };
+        self.inner = match self.inner.take(){
+            Some(state) => Some(state.accept(context.clone(), clcw.report_value()).await),
+            None => unreachable!(),
+        };
         if clcw.retransmit() == 1 {
             self.inner = match self.inner.take(){
                 Some(state) => Some(state.reject(context.clone()).await),
                 None => unreachable!(),
             };
         }
-        self.inner = match self.inner.take(){
-            Some(state) => Some(state.accept(context.clone(), clcw.report_value()).await),
-            None => unreachable!(),
-        };
         self.inner = match self.inner.take(){
             Some(state) => Some(state.lockout(context.clone(), clcw.lockout() == 1).await),
             None => unreachable!(),
@@ -1202,8 +1257,9 @@ where
             },
         }
     }
-    pub fn set_timeout_sec(&mut self, timeout_sec: u32) {
+    pub async fn set_timeout_sec(&mut self, timeout_sec: u32) {
         self.timeout_sec = timeout_sec;
+        self.send_status().await;
     }
     pub async fn send_set_vr_command(&mut self, vr: u8) -> Result<()> {
         let context = self.get_context();
@@ -1275,6 +1331,14 @@ where
         let context = self.get_context();
         self.inner = match self.inner.take(){
             Some(state) => Some(state.execute(context, Box::new(self.sync_and_channel_coding.clone())).await),
+            None => unreachable!(),
+        };
+    }
+
+    pub async fn send_status(&mut self) {
+        let context = self.get_context();
+        self.inner = match self.inner.take(){
+            Some(state) => Some(state.send_status(context).await),
             None => unreachable!(),
         };
     }
@@ -2063,7 +2127,7 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Unlocking");
 
-        fop_sm.set_timeout_sec(1);
+        fop_sm.set_timeout_sec(1).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -2163,7 +2227,7 @@ mod tests {
         assert!(fop_sm.inner.is_some());
         assert_eq!(fop_sm.inner.as_ref().unwrap().to_string(), "Initialize");
 
-        fop_sm.set_timeout_sec(1);
+        fop_sm.set_timeout_sec(1).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 

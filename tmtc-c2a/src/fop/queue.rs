@@ -46,6 +46,7 @@ trait FopQueueStateNode {
     fn accept(self: Box<Self>, context: FopQueueContext, vr: u8) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
     fn reject(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
     fn clear(self: Box<Self>, context: FopQueueContext, status_pattern: CopTaskStatusPattern) -> Pin<Box<dyn Future<Output = Box<dyn FopQueueStateNode>>>>;
+    fn send_status(&self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) -> Pin<Box<dyn Future<Output = ()>>>;
 }
 
 #[derive(Clone)]
@@ -91,7 +92,8 @@ impl ProcessingQueue {
             vs_at_id0: vs.wrapping_sub(next_id as u8) as u32,
         }
     }
-    async fn update_status(&mut self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
+
+    fn create_status(&self) -> CopQueueStatusSet {
         let (pending_vs, pending) = {
             if let Some((head_id, qctx)) = self.pending.front() {
                 let ctx = qctx.context();
@@ -135,9 +137,6 @@ impl ProcessingQueue {
                 (None, Some(CopQueueStatus::default()))
             }
         };
-        if self.pending.is_empty() && self.executed.is_empty() && self.rejected.is_empty() {
-            self.last_time = None;
-        }
         let vs_list = vec![pending_vs, executed_vs, rejected_vs];
         let head_vs = vs_list.into_iter().flatten().min().map(|vs| vs as u32).unwrap_or(((self.next_id + self.vs_at_id0) as u8) as u32);
         let oldest_arrival_time = self.last_time.map(|time| Timestamp {
@@ -149,7 +148,7 @@ impl ProcessingQueue {
             seconds: now.and_utc().timestamp(),
             nanos: now.and_utc().timestamp_subsec_nanos() as i32,
         });
-        let status = CopQueueStatusSet {
+        CopQueueStatusSet {
             pending,
             executed,
             rejected,
@@ -158,7 +157,14 @@ impl ProcessingQueue {
             vs_at_id0: self.vs_at_id0,
             timestamp,
             status: CopQueueStatusPattern::Processing.into(),
-        };
+        }
+    }
+
+    async fn update_status(&mut self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
+        if self.pending.is_empty() && self.executed.is_empty() && self.rejected.is_empty() {
+            self.last_time = None;
+        }
+        let status = self.create_status();
         if let Err(e) = queue_status_tx.send(status).await {
             error!("failed to send FOP queue status: {}", e);
         }
@@ -230,7 +236,7 @@ impl FopQueueStateNode for ProcessingQueue {
                         if let Err(e) = context.task_status_tx.send(status).await {
                             error!("failed to send COP status: {}", e);
                         }
-                        let mut ret = Box::new(ConfirmingQueue{
+                        let ret = Box::new(ConfirmingQueue{
                             pending,
                             confirm,
                             executed: self.executed,
@@ -349,6 +355,15 @@ impl FopQueueStateNode for ProcessingQueue {
             self as Box<dyn FopQueueStateNode>
         })
     }
+
+    fn send_status(&self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) -> Pin<Box<dyn Future<Output = ()>>> {
+        let status = self.create_status();
+        Box::pin(async move {
+            if let Err(e) = queue_status_tx.send(status).await {
+                error!("failed to send FOP queue status: {}", e);
+            }
+        })
+    }
 }
 
 struct ConfirmingQueue {
@@ -361,7 +376,7 @@ struct ConfirmingQueue {
 }
 
 impl ConfirmingQueue {
-    async fn update_status(&mut self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
+    fn create_status(&self) -> CopQueueStatusSet {
         let (pending_vs, pending) = {
             if let Some((head_id, qctx)) = self.pending.front() {
                 let ctx = qctx.context();
@@ -402,7 +417,7 @@ impl ConfirmingQueue {
             seconds: now.and_utc().timestamp(),
             nanos: now.and_utc().timestamp_subsec_nanos() as i32,
         });
-        let status = CopQueueStatusSet {
+        CopQueueStatusSet {
             pending,
             executed,
             rejected: Some(CopQueueStatus::default()),
@@ -411,7 +426,10 @@ impl ConfirmingQueue {
             vs_at_id0: self.vs_at_id0,
             timestamp,
             status: CopQueueStatusPattern::Confirming.into(),
-        };
+        }
+    }
+    async fn update_status(&self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
+        let status = self.create_status();
         if let Err(e) = queue_status_tx.send(status).await {
             error!("failed to send FOP queue status: {}", e);
         }
@@ -460,7 +478,7 @@ impl FopQueueStateNode for ConfirmingQueue {
             self as Box<dyn FopQueueStateNode>
         })
     }
-    fn execute(mut self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
+    fn execute(self: Box<Self>, context: FopQueueContext) -> Pin<Box<dyn Future<Output = (Box<dyn FopQueueStateNode>, Option<(u8, CommandContext)>)>>> {
         Box::pin(async move {
             let (id, ctx) = {
                 let (id, ctx) = self.confirm.clone();
@@ -626,6 +644,15 @@ impl FopQueueStateNode for ConfirmingQueue {
             self as Box<dyn FopQueueStateNode>
         })
     }
+
+    fn send_status(&self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) -> Pin<Box<dyn Future<Output = ()>>> {
+        let status = self.create_status();
+        Box::pin(async move {
+            if let Err(e) = queue_status_tx.send(status).await {
+                error!("failed to send FOP queue status: {}", e);
+            }
+        })
+    }
 }
 
 pub struct FopQueue {
@@ -727,6 +754,12 @@ impl FopQueue {
             None => unreachable!("FopQueue is empty"),
         };
         self.inner = Some(queue);
+    }
+
+    pub async fn send_status(&self, queue_status_tx: mpsc::Sender<CopQueueStatusSet>) {
+        if let Some(inner) = &self.inner {
+            inner.send_status(queue_status_tx).await;
+        }
     }
 }
 
