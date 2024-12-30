@@ -95,6 +95,7 @@ impl FopStateContext {
         if let Err(e) = self.worker_state_tx.send(CopWorkerStatus {
             state: status.into(),
             timeout_sec: self.timeout_sec.into(),
+            max_executing: self.max_executing as u32,
             timestamp: Some(timestamp),
         }).await {
             error!("failed to send FOP state: {}", e);

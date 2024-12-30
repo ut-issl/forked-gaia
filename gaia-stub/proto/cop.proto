@@ -118,7 +118,8 @@ enum CopTaskStatusPattern {
 message CopWorkerStatus {
   CopWorkerStatusPattern state = 1;
   uint64 timeout_sec = 2;
-  google.protobuf.Timestamp timestamp = 3;
+  uint32 max_executing = 3;
+  google.protobuf.Timestamp timestamp = 4;
 }
 
 enum CopWorkerStatusPattern {
