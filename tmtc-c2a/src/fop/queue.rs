@@ -38,6 +38,7 @@ impl FromIdTco for CopTaskStatus {
 pub struct FopQueueContext {
     pub task_status_tx: mpsc::Sender<CopTaskStatus>,
     pub queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
+    pub max_executing: usize,
 }
 
 pub struct FopQueue {
@@ -171,9 +172,13 @@ impl FopQueue {
         context: FopQueueContext,
     ) -> Option<(u8, CommandContext)> {
         let (id, ctx) = {
-            let id_ctx = match self.rejected.pop_front() {
-                Some((id,ctx)) => Some((id,ctx)),
-                None => self.pending.pop_front(),
+            let id_ctx = if self.executed.len() >= context.max_executing {
+                None
+            } else {
+                match self.rejected.pop_front() {
+                    Some((id,ctx)) => Some((id,ctx)),
+                    None => self.pending.pop_front(),
+                }
             };
             if let Some((id, ctx)) = id_ctx {
                 self.confirm_inc = 0;
@@ -196,6 +201,7 @@ impl FopQueue {
                 }
             }
         };
+        info!("executing task: {}", (id + self.vs_at_id0) as u8);
         let ret = ((id + self.vs_at_id0) as u8, ctx.clone());
         let status = CopTaskStatus::from_id_tco(
             (id, ctx.tco.as_ref().clone()),
@@ -334,6 +340,7 @@ mod tests {
         let context = FopQueueContext {
             task_status_tx,
             queue_status_tx,
+            max_executing: 15,
         };
         (context, task_status_rx, queue_status_rx)
     }

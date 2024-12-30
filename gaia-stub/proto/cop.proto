@@ -157,11 +157,12 @@ message CopCommand {
     CopTerminateCommand terminate = 2;
     CopUnlockCommand unlock = 3;
     CopSetTimeoutCommand set_timeout = 4;
-    CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 5;
-    CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
-    CopSendSetVRCommand send_set_vr = 7;
-    CopSendUnlockCommand send_unlock = 8;
-    CopStatusUpdateCommand status_update = 9;
+    CopSetMaxExecutingCommand set_max_executing = 5;
+    CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 6;
+    CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 7;
+    CopSendSetVRCommand send_set_vr = 8;
+    CopSendUnlockCommand send_unlock = 9;
+    CopStatusUpdateCommand status_update = 10;
   }
 }
 
@@ -177,6 +178,10 @@ message CopUnlockCommand {
 
 message CopSetTimeoutCommand {
   uint32 timeout_sec = 1;
+}
+
+message CopSetMaxExecutingCommand {
+  uint32 max_executing = 1;
 }
 
 message CopSetAutoRetransmitEnableCommand {

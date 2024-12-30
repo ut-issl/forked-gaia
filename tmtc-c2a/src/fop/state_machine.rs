@@ -80,6 +80,7 @@ pub struct FopStateContext {
     queue_status_tx: mpsc::Sender<CopQueueStatusSet>,
     task_status_tx: mpsc::Sender<CopTaskStatus>,
     timeout_sec: u32,
+    max_executing: usize,
     next_id: CopTaskId,
     tc_scid: u16,
 }
@@ -103,6 +104,7 @@ impl FopStateContext {
         FopQueueContext {
             queue_status_tx: self.queue_status_tx.clone(),
             task_status_tx: self.task_status_tx.clone(),
+            max_executing: self.max_executing,
         }
     }
 }
@@ -1041,6 +1043,7 @@ where
 {
     inner: Option<Box<dyn FopStateNode>>,
     timeout_sec: u32,
+    max_executing: usize,
     tc_scid: u16,
     next_id: CopTaskId,
     worker_state_tx: mpsc::Sender<CopWorkerStatus>,
@@ -1066,6 +1069,7 @@ where
             queue_status_tx,
             task_status_tx,
             timeout_sec: 20,
+            max_executing: 10,
             sync_and_channel_coding,
             tc_scid,
             next_id: 0,
@@ -1077,6 +1081,7 @@ where
             queue_status_tx: self.queue_status_tx.clone(),
             task_status_tx: self.task_status_tx.clone(),
             timeout_sec: self.timeout_sec,
+            max_executing: self.max_executing,
             next_id: self.next_id,
             tc_scid: self.tc_scid,
         }
@@ -1204,6 +1209,10 @@ where
     }
     pub async fn set_timeout_sec(&mut self, timeout_sec: u32) {
         self.timeout_sec = timeout_sec;
+        self.send_status().await;
+    }
+    pub async fn set_max_executing(&mut self, max_executing: usize) {
+        self.max_executing = max_executing;
         self.send_status().await;
     }
     pub async fn send_set_vr_command(&mut self, vr: u8) -> Result<()> {

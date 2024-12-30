@@ -414,6 +414,13 @@ where
                             error!("response receiver has gone");
                         }
                     }
+                    cop_command::Command::SetMaxExecuting(inner) => {
+                        let mut sm_locked = state_machine_clone.lock().await;
+                        sm_locked.set_max_executing(inner.max_executing as usize).await;
+                        if tx.send(Ok(())).is_err() {
+                            error!("response receiver has gone");
+                        }
+                    }
                     cop_command::Command::SetAutoRetransmitEnable(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
                         let ret = sm_locked.auto_retransmit_enable().await;
