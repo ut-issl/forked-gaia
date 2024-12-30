@@ -3,6 +3,7 @@ syntax = "proto3";
 package tco_tmiv;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
 
 message Tco {
   string name = 1;

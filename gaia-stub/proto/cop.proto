@@ -101,6 +101,7 @@ message CopTaskStatus {
   tco_tmiv.Tco tco = 2;
   CopTaskStatusPattern status = 3;
   google.protobuf.Timestamp timestamp = 4;
+  bool is_confirm_command = 5;
 }
 
 enum CopTaskStatusPattern {
@@ -116,8 +117,8 @@ enum CopTaskStatusPattern {
 
 message CopWorkerStatus {
   CopWorkerStatusPattern state = 1;
-  bool is_auto_retransmit_enabled = 2;
-  uint64 timeout_sec = 3;
+  uint64 timeout_sec = 2;
+  uint32 max_executing = 3;
   google.protobuf.Timestamp timestamp = 4;
 }
 
@@ -126,11 +127,12 @@ enum CopWorkerStatusPattern {
   WORKER_IDLE = 1;
   WORKER_INITIALIZE = 2;
   WORKER_ACTIVE = 3;
-  WORKER_LOCKOUT = 4;
-  WORKER_UNLOCKING = 5;
-  WORKER_TIMEOUT = 6;
-  WORKER_FAILED = 7;
-  WORKER_CANCELED = 8;
+  WORKER_AUTO_RETRANSMIT_OFF = 4;
+  WORKER_LOCKOUT = 5;
+  WORKER_UNLOCKING = 6;
+  WORKER_TIMEOUT = 7;
+  WORKER_FAILED = 8;
+  WORKER_CANCELED = 9;
 }
 
 message CopQueueStatusSet {
@@ -141,6 +143,7 @@ message CopQueueStatusSet {
   uint32 vs_at_id0 = 5;
   google.protobuf.Timestamp oldest_arrival_time = 6;
   google.protobuf.Timestamp timestamp = 7;
+  uint32 confirm_inc = 8;
 }
 
 message CopQueueStatus {
@@ -155,8 +158,12 @@ message CopCommand {
     CopTerminateCommand terminate = 2;
     CopUnlockCommand unlock = 3;
     CopSetTimeoutCommand set_timeout = 4;
-    CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 5;
-    CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
+    CopSetMaxExecutingCommand set_max_executing = 5;
+    CopSetAutoRetransmitEnableCommand set_auto_retransmit_enable = 6;
+    CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 7;
+    CopSendSetVRCommand send_set_vr = 8;
+    CopSendUnlockCommand send_unlock = 9;
+    CopStatusUpdateCommand status_update = 10;
   }
 }
 
@@ -174,8 +181,22 @@ message CopSetTimeoutCommand {
   uint32 timeout_sec = 1;
 }
 
+message CopSetMaxExecutingCommand {
+  uint32 max_executing = 1;
+}
+
 message CopSetAutoRetransmitEnableCommand {
 }
 
 message CopSetAutoRetransmitDisableCommand {
+}
+
+message CopSendSetVRCommand {
+  uint32 vr = 1;
+}
+
+message CopSendUnlockCommand {
+}
+
+message CopStatusUpdateCommand {
 }

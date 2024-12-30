@@ -1,10 +1,10 @@
 mod satconfig;
 pub use satconfig::Satconfig;
-pub mod fop;
 pub mod kble_gs;
 pub mod proto;
 pub mod registry;
 pub mod satellite;
 pub mod tco;
 pub mod tco_tmiv_util;
+pub mod fop;
 mod tmiv;

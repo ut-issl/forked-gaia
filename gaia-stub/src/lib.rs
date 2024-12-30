@@ -47,6 +47,7 @@ pub mod cop {
                 super::CopWorkerStatusPattern::WorkerClcwUnreceived => "CLCW_UNRECEIVED".to_string(),
                 super::CopWorkerStatusPattern::WorkerIdle => "IDLE".to_string(),
                 super::CopWorkerStatusPattern::WorkerActive => "ACTIVE".to_string(),
+                super::CopWorkerStatusPattern::WorkerAutoRetransmitOff => "AUTO_RETRANSMIT_OFF".to_string(),
                 super::CopWorkerStatusPattern::WorkerInitialize => "INITIALIZE".to_string(),
                 super::CopWorkerStatusPattern::WorkerCanceled => "CANCELED".to_string(),
                 super::CopWorkerStatusPattern::WorkerFailed => "FAILED".to_string(),

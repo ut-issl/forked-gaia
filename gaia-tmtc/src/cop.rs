@@ -85,7 +85,7 @@ impl CopStatusStore {
         let id = status.task_id;
         let pattern = status.status();
         match pattern {
-            CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled => {
+            CopTaskStatusPattern::Accepted | CopTaskStatusPattern::Canceled | CopTaskStatusPattern::Failed | CopTaskStatusPattern::Lockout | CopTaskStatusPattern::Timeout => {
                 let pop_item = {
                     let mut completed = self.completed.write().await;
                     if completed.len() == self.capacity {
@@ -108,15 +108,15 @@ impl CopStatusStore {
     }
 
     pub async fn set_worker(&self, status: &CopWorkerStatus) {
-        self.worker_status.write().await.clone_from(&status);
+        self.worker_status.write().await.clone_from(status);
     }
     
     pub async fn set_queue(&self, status: &CopQueueStatusSet) {
-        self.queue_status.write().await.clone_from(&status);
+        self.queue_status.write().await.clone_from(status);
     }
 
     pub async fn set_vsvr(&self, status: &CopVsvr) {
-        self.vsvr.write().await.clone_from(&status);
+        self.vsvr.write().await.clone_from(status);
     }
 }
 
@@ -201,15 +201,11 @@ impl<C> CopService<C> {
     }
 }
 
-pub trait IsTimeout {
-    fn is_timeout(&self) -> bool;
-}
-
 #[tonic::async_trait]
 impl<C> Cop for CopService<C>
 where
     C: super::Handle<Arc<CopCommand>> + Send + Sync + 'static,
-    C::Response: Send + IsTimeout + 'static,
+    C::Response: Send + 'static,
 {
     type OpenTaskStatusStreamStream = stream::BoxStream<'static, Result<CopTaskStatusStreamResponse, Status>>;
     type OpenWorkerStatusStreamStream = stream::BoxStream<'static, Result<CopWorkerStatusStreamResponse, Status>>;
@@ -343,20 +339,12 @@ where
             Status::internal(format!("{:?}", e))
         }
 
-        let time_out: bool = self
-            .cop_handler
+        self.cop_handler
             .lock()
             .await
             .handle(Arc::new(cop_command))
             .await
-            .map_err(internal_error)?
-            .is_timeout();
-
-        if time_out {
-            return Err(Status::deadline_exceeded(
-                "command was not completed on time",
-            ));
-        }
+            .map_err(internal_error)?;
 
         Ok(Response::new(PostCopCommandResponse {}))
     }

@@ -1,8 +1,7 @@
 use std::{sync::Arc, time};
 
 use crate::{
-    registry::{CommandRegistry, FatCommandSchema, TelemetryRegistry},
-    tco::{self, ParameterListWriter},
+    registry::TelemetryRegistry,
     tmiv,
 };
 use anyhow::{anyhow, Result};
@@ -10,16 +9,15 @@ use async_trait::async_trait;
 use gaia_ccsds_c2a::{
     ccsds::{
         self, aos,
-        tc::{self, clcw::CLCW},
+        tc::clcw::CLCW,
     },
     ccsds_c2a::{
         self,
         aos::{virtual_channel::Demuxer, SpacePacket},
-        tc::{segment, space_packet},
     },
 };
 use gaia_tmtc::{
-    cop::{CopCommand, IsTimeout},
+    cop::CopCommand,
     tco_tmiv::{Tco, Tmiv},
     Handle,
 };
@@ -73,76 +71,6 @@ impl TmivBuilder {
     }
 }
 
-#[derive(Clone)]
-pub struct CommandContext {
-    tc_scid: u16,
-    fat_schema: FatCommandSchema,
-    pub tco: Arc<Tco>,
-}
-
-impl CommandContext {
-    fn build_tc_segment(&self, data_field_buf: &mut [u8]) -> Result<usize> {
-        let mut segment = segment::Builder::new(data_field_buf).unwrap();
-        segment.use_default();
-
-        let space_packet_bytes = segment.body_mut();
-        let mut space_packet = space_packet::Builder::new(&mut space_packet_bytes[..]).unwrap();
-        let tco_reader = tco::Reader::new(&self.tco);
-        let params_writer = ParameterListWriter::new(&self.fat_schema.schema);
-        space_packet.use_default();
-        let ph = space_packet.ph_mut();
-        ph.set_version_number(0); // always zero
-        ph.set_apid(self.fat_schema.apid);
-        let sh = space_packet.sh_mut();
-        sh.set_command_id(self.fat_schema.command_id);
-        sh.set_destination_type(self.fat_schema.destination_type);
-        sh.set_execution_type(self.fat_schema.execution_type);
-        if self.fat_schema.has_time_indicator {
-            sh.set_time_indicator(tco_reader.time_indicator()?);
-        } else {
-            sh.set_time_indicator(0);
-        }
-        let user_data_len = params_writer.write_all(
-            space_packet.user_data_mut(),
-            tco_reader.parameters().into_iter(),
-        )?;
-        let space_packet_len = space_packet.finish(user_data_len);
-        let segment_len = segment.finish(space_packet_len);
-        Ok(segment_len)
-    }
-
-    pub async fn transmit_to<T>(
-        &self,
-        sync_and_channel_coding: &mut T,
-        vs: Option<u8>,
-    ) -> Result<()>
-    where
-        T: tc::SyncAndChannelCoding,
-    {
-        let vcid = 0; // FIXME: make this configurable
-
-        let (frame_type, sequence_number) = match (self.tco.is_type_ad, vs) {
-            (true, Some(vs)) => (tc::sync_and_channel_coding::FrameType::TypeAD, vs),
-            (false, None) => (tc::sync_and_channel_coding::FrameType::TypeBD, 0),
-            (true, None) => {
-                return Err(anyhow!("VS is required for Type-AD"));
-            }
-            (false, Some(_)) => {
-                warn!("VS is not allowed for Type-BD. Ignoring VS.");
-                (tc::sync_and_channel_coding::FrameType::TypeBD, 0)
-            }
-        };
-
-        let mut data_field = vec![0u8; 1017]; // FIXME: hard-coded max size
-        let segment_len = self.build_tc_segment(&mut data_field)?;
-        data_field.truncate(segment_len);
-        sync_and_channel_coding
-            .transmit(self.tc_scid, vcid, frame_type, sequence_number, &data_field)
-            .await?;
-        Ok(())
-    }
-}
-
 pub type CopTaskId = u32;
 
 pub fn create_cop_task_channel() -> (CopTaskSender, CopTaskReceiver) {
@@ -150,33 +78,35 @@ pub fn create_cop_task_channel() -> (CopTaskSender, CopTaskReceiver) {
     (CopTaskSender { tx }, CopTaskReceiver { rx })
 }
 
+type CopTaskSendResult = Result<Option<CopTaskId>>;
+
 #[derive(Clone)]
 pub struct CopTaskSender {
-    tx: mpsc::Sender<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    tx: mpsc::Sender<(Arc<Tco>, oneshot::Sender<CopTaskSendResult>)>,
 }
 
 impl CopTaskSender {
-    pub async fn send(&self, ctx: CommandContext) -> Result<Result<Option<CopTaskId>>> {
+    pub async fn send(&self, tco: Arc<Tco>) -> Result<Result<Option<CopTaskId>>> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send((ctx, tx)).await?;
+        self.tx.send((tco, tx)).await?;
         Ok(rx.await?)
     }
 }
 
 pub struct CopTaskReceiver {
-    rx: mpsc::Receiver<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)>,
+    rx: mpsc::Receiver<(Arc<Tco>, oneshot::Sender<CopTaskSendResult>)>,
 }
 
 impl CopTaskReceiver {
     pub async fn recv(
         &mut self,
-    ) -> Option<(CommandContext, oneshot::Sender<Result<Option<CopTaskId>>>)> {
+    ) -> Option<(Arc<Tco>, oneshot::Sender<Result<Option<CopTaskId>>>)> {
         self.rx.recv().await
     }
 }
 
 pub fn create_clcw_channel() -> (CLCWSender, CLCWReceiver) {
-    let (tx, rx) = broadcast::channel(16);
+    let (tx, rx) = broadcast::channel(1024);
     (CLCWSender { tx }, CLCWReceiver { rx })
 }
 
@@ -208,27 +138,17 @@ impl CLCWReceiver {
     }
 }
 
-pub struct TimeOutResponse {
-    pub is_timeout: bool,
-}
-
-impl IsTimeout for TimeOutResponse {
-    fn is_timeout(&self) -> bool {
-        self.is_timeout
-    }
-}
-
 pub fn create_cop_command_channel() -> (CopCommandSender, CopCommandReceiver) {
     let (tx, rx) = mpsc::channel(16);
     (CopCommandSender { tx }, CopCommandReceiver { rx })
 }
 
 pub struct CopCommandSender {
-    tx: mpsc::Sender<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)>,
+    tx: mpsc::Sender<(CopCommand, oneshot::Sender<Result<()>>)>,
 }
 
 impl CopCommandSender {
-    pub async fn send(&self, command: CopCommand) -> Result<Result<TimeOutResponse>> {
+    pub async fn send(&self, command: CopCommand) -> Result<Result<()>> {
         let (tx, rx) = oneshot::channel();
         self.tx.send((command, tx)).await?;
         Ok(rx.await?)
@@ -236,41 +156,29 @@ impl CopCommandSender {
 }
 
 pub struct CopCommandReceiver {
-    rx: mpsc::Receiver<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)>,
+    rx: mpsc::Receiver<(CopCommand, oneshot::Sender<Result<()>>)>,
 }
 
 impl CopCommandReceiver {
-    pub async fn recv(&mut self) -> Option<(CopCommand, oneshot::Sender<Result<TimeOutResponse>>)> {
+    pub async fn recv(&mut self) -> Option<(CopCommand, oneshot::Sender<Result<()>>)> {
         self.rx.recv().await
     }
 }
 
 #[derive(Clone)]
 pub struct Service {
-    registry: Arc<CommandRegistry>,
-    tc_scid: u16,
     task_tx: CopTaskSender,
 }
 
 impl Service {
-    pub fn new(registry: Arc<CommandRegistry>, tc_scid: u16, task_tx: CopTaskSender) -> Self {
+    pub fn new(task_tx: CopTaskSender) -> Self {
         Self {
-            registry,
-            tc_scid,
             task_tx,
         }
     }
 
     async fn try_handle_command(&mut self, tco: Arc<Tco>) -> Result<Option<CopTaskId>> {
-        let Some(fat_schema) = self.registry.lookup(&tco.name) else {
-            return Err(anyhow!("unknown command: {}", tco.name));
-        };
-        let ctx = CommandContext {
-            tc_scid: self.tc_scid,
-            fat_schema,
-            tco,
-        };
-        let response = self.task_tx.send(ctx).await??;
+        let response = self.task_tx.send(tco).await??;
         Ok(response)
     }
 }
