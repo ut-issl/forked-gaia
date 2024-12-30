@@ -56,12 +56,5 @@ pub mod cop {
                 super::CopWorkerStatusPattern::WorkerUnlocking => "UNLOCKING".to_string(),
             }
         }
-
-        pub fn queue_state_to_string(queue_state: super::CopQueueStatusPattern) -> String {
-            match queue_state {
-                super::CopQueueStatusPattern::Processing => "PROCESSING".to_string(),
-                super::CopQueueStatusPattern::Confirming => "CONFIRMING".to_string(),
-            }
-        }
     }
 }

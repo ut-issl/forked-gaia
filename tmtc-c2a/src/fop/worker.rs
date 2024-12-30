@@ -374,7 +374,6 @@ where
             }
         };
         let state_machine_clone = state_machine.clone();
-        let registry_clone = registry.clone();
         let cop_command_task = async move {
             while let Some((command, tx)) = cop_command_rx.recv().await {
                 let command_inner = match command.command {
@@ -443,30 +442,6 @@ where
                             error!("response receiver has gone");
                         }
                     }
-                    cop_command::Command::BreakPointConfirm(inner) => {
-                        let mut sm_locked = state_machine_clone.lock().await;
-                        let tco = match inner.confirmation_tco {
-                            None => {
-                                if tx.send(Err(anyhow!("confirmation TCO is required"))).is_err() {
-                                    error!("response receiver has gone");
-                                }
-                                continue;
-                            }
-                            Some(tco) => Arc::new(tco),
-                        };
-                        let Some(fat_schema) = registry_clone.lookup(&tco.name) else {
-                            return Err(anyhow!("unknown command: {}", tco.name));
-                        };
-                        let ctx = CommandContext {
-                            tc_scid,
-                            fat_schema,
-                            tco,
-                        };
-                        let ret = sm_locked.break_point_confirm(ctx).await;
-                        if tx.send(ret).is_err() {
-                            error!("response receiver has gone");
-                        }
-                    },
                     cop_command::Command::StatusUpdate(_) => {
                         let mut sm_locked = state_machine_clone.lock().await;
                         sm_locked.send_status().await;

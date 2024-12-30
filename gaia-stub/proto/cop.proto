@@ -142,12 +142,7 @@ message CopQueueStatusSet {
   uint32 vs_at_id0 = 5;
   google.protobuf.Timestamp oldest_arrival_time = 6;
   google.protobuf.Timestamp timestamp = 7;
-  CopQueueStatusPattern status = 8;
-}
-
-enum CopQueueStatusPattern {
-  Processing = 0;
-  Confirming = 1;
+  uint32 confirm_inc = 8;
 }
 
 message CopQueueStatus {
@@ -166,8 +161,7 @@ message CopCommand {
     CopSetAutoRetransmitDisableCommand set_auto_retransmit_disable = 6;
     CopSendSetVRCommand send_set_vr = 7;
     CopSendUnlockCommand send_unlock = 8;
-    CopBreakPointConfirmCommand break_point_confirm = 9;
-    CopStatusUpdateCommand status_update = 10;
+    CopStatusUpdateCommand status_update = 9;
   }
 }
 
@@ -196,10 +190,6 @@ message CopSendSetVRCommand {
 }
 
 message CopSendUnlockCommand {
-}
-
-message CopBreakPointConfirmCommand {
-  tco_tmiv.Tco confirmation_tco = 1;
 }
 
 message CopStatusUpdateCommand {

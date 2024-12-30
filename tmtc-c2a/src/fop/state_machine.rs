@@ -3,7 +3,7 @@ use std::{collections::VecDeque, fmt::Display, future::Future, pin::Pin};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use gaia_ccsds_c2a::ccsds::tc::{self, clcw::CLCW, sync_and_channel_coding::FrameType};
-use gaia_tmtc::cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern, CopQueueStatusPattern};
+use gaia_tmtc::cop::{CopQueueStatus, CopQueueStatusSet, CopTaskStatus, CopTaskStatusPattern, CopWorkerStatus, CopWorkerStatusPattern};
 use prost_types::Timestamp;
 use tokio::sync::mpsc;
 use tracing::error;
@@ -65,7 +65,6 @@ trait FopStateNode: Display {
     fn auto_retransmit_disable(self: Box<Self>, context: FopStateContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
     fn send_set_vr_command(&mut self, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>, vr: u8) -> Pin<Box<dyn Future<Output = Result<()>>>>;
     fn send_unlock_command(&self, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync + 'static>) -> Pin<Box<dyn Future<Output = Result<()>>>>;
-    fn break_point_confirm(self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = FopStateNodeResult>>>;
 
     fn execute (self: Box<Self>, context: FopStateContext, sync_and_channel_coding: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Box<dyn FopStateNode>>>>;
 
@@ -186,14 +185,6 @@ impl FopStateNode for FopStateIdle {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in idle state")) })
     }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in idle state",
-                self as Box<dyn FopStateNode>,
-            ))
-        })
-    }
 
     fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>,Option<CopTaskId>), FopStateNodeError>>>> {
         Box::pin(async {
@@ -295,14 +286,6 @@ impl FopStateNode for FopStateLockout {
     }
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in lockout state")) })
-    }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in lockout state",
-                self as Box<dyn FopStateNode>,
-            ))
-        })
     }
 
     fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option <CopTaskId>), FopStateNodeError>>>> {
@@ -430,14 +413,6 @@ impl FopStateNode for FopStateUnlocking {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in unlocking state")) })
     }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in unlocking state",
-                self as Box<dyn FopStateNode>,
-            ))
-        })
-    }
 
     fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
         Box::pin(async {
@@ -564,14 +539,6 @@ impl FopStateNode for FopStateClcwUnreceived {
     }
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in clcw_unreceived state")) })
-    }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in clcw_unreceived state",
-                self as Box<dyn FopStateNode>,
-            ))
-        })
     }
 
     fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
@@ -702,14 +669,6 @@ impl FopStateNode for FopStateInitialize {
     }
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync >) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in initialize state")) })
-    }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in initialize state",
-                self as Box<dyn FopStateNode>,
-            ))
-        })
     }
 
     fn append (self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
@@ -862,12 +821,6 @@ impl FopStateNode for FopStateActive {
     fn send_unlock_command(&self, _: FopStateContext, _: Box<dyn tc::SyncAndChannelCoding + Send + Sync>) -> Pin<Box<dyn Future<Output = Result<()>>>> {
         Box::pin(async { Err(anyhow!("send_unlock_command is not allowed in active state")) })
     }
-    fn break_point_confirm(mut self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async move {
-            self.queue.confirm(context.get_queue_context(), cmd_ctx).await;
-            Ok(self as Box<dyn FopStateNode>)
-        })
-    }
 
     fn append (mut self: Box<Self>, context: FopStateContext, cmd_ctx: CommandContext) -> Pin<Box<dyn Future<Output = Result<(Box<dyn FopStateNode>, Option<CopTaskId>), FopStateNodeError>>>> {
         Box::pin(async move {
@@ -943,7 +896,7 @@ fn create_queue_status(vs: u8) -> CopQueueStatusSet {
         vs_at_id0: 0,
         oldest_arrival_time: None,
         timestamp,
-        status: CopQueueStatusPattern::Processing.into(),
+        confirm_inc: 0,
     }
 }
 
@@ -1038,14 +991,6 @@ impl FopStateNode for FopStateAutoRetransmitOff {
             } else {
                 Ok(())
             }
-        })
-    }
-    fn break_point_confirm(self: Box<Self>, _: FopStateContext, _: CommandContext) -> Pin<Box<dyn Future<Output = Result<Box<dyn FopStateNode>, FopStateNodeError>>>> {
-        Box::pin(async {
-            Err(FopStateNodeError::new(
-                "break_point_confirm is not allowed in auto_retransmit_off state",
-                self as Box<dyn FopStateNode>,
-            ))
         })
     }
 
@@ -1275,30 +1220,6 @@ where
         match self.inner.as_mut(){
             Some(state) => {
                 state.send_unlock_command(context, Box::new(self.sync_and_channel_coding.clone())).await
-            },
-            None => unreachable!(),
-        }
-    }
-
-    pub async fn break_point_confirm(&mut self, cmd_ctx: CommandContext) -> Result<()> {
-        let context = self.get_context();
-        match self.inner.take(){
-            Some(state) => {
-                let ret = state.break_point_confirm(context, cmd_ctx).await;
-                match ret {
-                    Ok(state) => {
-                        let next_id = state.get_next_id();
-                        self.inner = Some(state);
-                        self.next_id = next_id.unwrap_or(self.next_id);
-                        Ok(())
-                    },
-                    Err(e) => {
-                        let next_id = e.state.get_next_id();
-                        self.inner = Some(e.state);
-                        self.next_id = next_id.unwrap_or(self.next_id);
-                        Err(e.message)
-                    },
-                }
             },
             None => unreachable!(),
         }
@@ -2130,6 +2051,7 @@ mod tests {
         fop_sm.set_timeout_sec(1).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerUnlocking as i32);
 
         fop_sm.evaluate_timeout().await;
         assert!(fop_sm.inner.is_some());
@@ -2229,6 +2151,7 @@ mod tests {
 
         fop_sm.set_timeout_sec(1).await;
 
+        assert_eq!(worker_rx.recv().await.unwrap().state, CopWorkerStatusPattern::WorkerInitialize as i32);
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         fop_sm.evaluate_timeout().await;
