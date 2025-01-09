@@ -363,7 +363,7 @@ where
         };
         let state_machine_clone = state_machine.clone();
         let execute_command_task = async {
-            let mut instant = tokio::time::interval(tokio::time::Duration::from_millis(10));
+            let mut instant = tokio::time::interval(tokio::time::Duration::from_millis(100));
             instant.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 instant.tick().await;
