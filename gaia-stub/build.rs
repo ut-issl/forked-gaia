@@ -4,14 +4,14 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     tonic_build::configure()
         .file_descriptor_set_path(out_dir.join("broker_descriptor.bin"))
-        .compile(&["proto/broker.proto"], &["proto"])
+        .compile_protos(&["proto/broker.proto"], &["proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
     tonic_build::configure()
         .file_descriptor_set_path(out_dir.join("recorder_descriptor.bin"))
-        .compile(&["proto/recorder.proto"], &["proto"])
+        .compile_protos(&["proto/recorder.proto"], &["proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
     tonic_build::configure()
         .file_descriptor_set_path(out_dir.join("cop_descriptor.bin"))
-        .compile(&["proto/cop.proto"], &["proto"])
+        .compile_protos(&["proto/cop.proto"], &["proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 }

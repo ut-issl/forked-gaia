@@ -6,6 +6,6 @@ fn main() {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
         .file_descriptor_set_path(out_dir.join("tmtc_generic_c2a.bin"))
-        .compile(&["./proto/tmtc_generic_c2a.proto"], &["./proto"])
+        .compile_protos(&["./proto/tmtc_generic_c2a.proto"], &["./proto"])
         .unwrap_or_else(|e| panic!("Failed to compile protos {:?}", e));
 }
