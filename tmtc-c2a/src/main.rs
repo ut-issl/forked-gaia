@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::{fs, io};
 
 use anyhow::{Context, Result};
-use axum::ServiceExt;
 use clap::Parser;
 use gaia_tmtc::broker::broker_server::BrokerServer;
 use gaia_tmtc::cop::cop_server::CopServer;
@@ -247,22 +246,20 @@ async fn main() -> Result<()> {
             .register_encoded_file_descriptor_set(broker::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(proto::tmtc_generic_c2a::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(cop::FILE_DESCRIPTOR_SET)
-            .build()
+            .build_v1()
             .unwrap();
 
         let socket_addr = SocketAddr::new(args.broker_addr, args.broker_port);
         tracing::info!(message = "starting broker", %socket_addr);
 
-        let rpc_service = Server::builder()
+        Server::builder()
             .layer(layer)
             .add_service(broker_server)
             .add_service(cop_server)
             .add_service(tmtc_generic_c2a_server)
             .add_service(health_service)
             .add_service(reflection_service)
-            .into_service();
-
-        axum::Server::bind(&socket_addr).serve(rpc_service.into_make_service())
+            .serve(socket_addr)
     };
 
     tokio::select! {

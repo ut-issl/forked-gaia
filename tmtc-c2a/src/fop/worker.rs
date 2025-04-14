@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::SystemTime};
 
 use anyhow::{anyhow, Result};
-use axum::async_trait;
 use gaia_ccsds_c2a::{ccsds::tc, ccsds_c2a::tc::{segment, space_packet}};
 use gaia_tmtc::{cop::{cop_command, CopCommand, CopQueueStatusSet, CopTaskStatus, CopVsvr, CopWorkerStatus}, tco_tmiv::{Tco, Tmiv}, Handle};
 use prost_types::Timestamp;
@@ -150,7 +149,7 @@ impl Service {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Handle<Arc<CopCommand>> for Service {
     type Response = ();
 

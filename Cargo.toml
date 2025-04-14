@@ -22,6 +22,17 @@ repository = "https://github.com/arkedge/gaia"
 license = "MPL-2.0"
 
 [workspace.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tonic = "0.13"
+tonic-health = "0.13"
+tonic-reflection = "0.13"
+tonic-web = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+tonic-build = "0.13"
+tower = "0.5"
+tower-http = "0.5"
+http = "1.3.1"
 gaia-stub = { path = "./gaia-stub" }
 gaia-ccsds-c2a = { path = "./gaia-ccsds-c2a" }
 gaia-tmtc = { path = "./gaia-tmtc" }
